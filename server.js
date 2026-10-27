@@ -151,7 +151,7 @@ app.post('/api/auth/logout', (req,res) => req.session.destroy(() => { res.clearC
 // Customer creates a trip request. This is a request, never an automatic confirmed booking.
 app.post('/api/rides', requireRole('customer'), (req,res) => {
  const pickup = clean(req.body.pickup,180), destination = clean(req.body.destination,180);
- const serviceType = ['airport','city','hourly'].includes(req.body.serviceType) ? req.body.serviceType : 'airport';
+ const serviceType = ['airport','city','hourly','garden','moving'].includes(req.body.serviceType) ? req.body.serviceType : 'airport';
  const travelDate = clean(req.body.travelDate,10), travelTime = clean(req.body.travelTime,5);
  const passengers = Number(req.body.passengers), luggage = Number(req.body.luggage);
  const vehicleType = ['PKW','Van','egal'].includes(req.body.vehicleType) ? req.body.vehicleType : 'PKW';
