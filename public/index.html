@@ -104,7 +104,32 @@ footer{text-align:center;padding:25px;color:#64748b}
 <section class="panel">
 <h2 data-t="account">Kundenkonto</h2>
 <p data-t="accountInfo">Registrieren oder anmelden, um dein Konto zu nutzen.</p>
+
 <form id="authForm">
+  <label for="name">Name / الاسم</label>
+  <input id="name" type="text" autocomplete="name">
+
+  <label for="email">E-Mail</label>
+  <input id="email" type="email" required autocomplete="email">
+
+  <label for="password">Passwort / كلمة المرور (10 Zeichen)</label>
+  <input id="password" type="password" required minlength="10"
+         autocomplete="current-password">
+
+  <label for="role">Kontotyp / نوع الحساب</label>
+  <select id="role">
+    <option value="customer">Kunde / زبون</option>
+    <option value="driver">Fahrer / سائق</option>
+  </select>
+
+  <div style="display:flex;gap:10px;flex-wrap:wrap">
+    <button type="button" onclick="auth('login')">Anmelden / دخول</button>
+    <button type="button" onclick="auth('register')">Registrieren / تسجيل</button>
+    <button type="button" onclick="auth('logout')">Abmelden / خروج</button>
+  </div>
+</form>
+<div id="authMessage" role="status"></div>
+
 <label data-t="emailLabel" for="email">E-Mail</label>
 <input id="email" type="email" required autocomplete="email">
 <label data-t="passwordLabel" for="password">Passwort</label>
