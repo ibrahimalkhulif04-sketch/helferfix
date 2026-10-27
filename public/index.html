@@ -1,14 +1,222 @@
 
-
 <!DOCTYPE html>
 <html lang="de">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HelferFix</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HelferFix</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,sans-serif;background:#f4f7fb;color:#172033}
+header{background:#123b66;color:white;padding:22px 16px}
+nav{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+.logo{font-size:27px;font-weight:bold}
+select,button,input{padding:11px;border-radius:8px;border:1px solid #ccd5e0;font-size:15px}
+button{cursor:pointer;background:#147d58;color:white;border:0;font-weight:bold}
+.hero{background:#dcefe7;padding:35px 20px;text-align:center}
+.hero h1{font-size:32px;margin:5px}
+main{max-width:1000px;margin:auto;padding:20px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:15px}
+.card,.panel{background:white;border-radius:14px;padding:20px;box-shadow:0 3px 12px #0000000b}
+.card h3{margin-top:5px}
+.card p{line-height:1.6}
+.panel{margin-top:22px}
+form{display:grid;gap:12px}
+input,select{width:100%;background:white}
+.hidden{display:none}
+.notice{padding:12px;background:#e4f3e9;border-radius:8px;margin-top:12px}
+footer{text-align:center;padding:25px;color:#64748b}
+</style>
 </head>
 <body>
-  <h1>Willkommen bei HelferFix!</h1>
-  <p>Hilfe für Gartenarbeit, Umzüge und Möbelmontage.</p>
+<header>
+<nav>
+<div class="logo">🛠️ HelferFix</div>
+<select id="language" aria-label="Language">
+<option value="de">Deutsch</option>
+<option value="ar">العربية</option>
+<option value="en">English</option>
+</select>
+</nav>
+</header>
+
+<section class="hero">
+<h1 data-t="title">Hilfe, wenn du sie brauchst.</h1>
+<p data-t="subtitle">Zuverlässige Hilfe vor Ort – einfach anfragen.</p>
+<button onclick="document.getElementById('services').scrollIntoView({behavior:'smooth'})" data-t="explore">Services entdecken</button>
+</section>
+
+<main>
+<h2 data-t="services">Unsere Dienstleistungen</h2>
+<div class="cards" id="services">
+<article class="card">
+<h3 data-t="garden">🌿 Gartenhilfe</h3>
+<p data-t="gardenDesc">Hilfe bei Gartenarbeit und Pflege.</p>
+<button onclick="chooseService('garden')" data-t="request">Hilfe anfragen</button>
+</article>
+<article class="card">
+<h3 data-t="moving">🪑 Umzug & Möbelmontage</h3>
+<p data-t="movingDesc">Unterstützung beim Umzug und Möbelaufbau.</p>
+<button onclick="chooseService('moving')" data-t="request">Hilfe anfragen</button>
+</article>
+<article class="card">
+<h3 data-t="airport">🚗 Flughafentransfer</h3>
+<p data-t="airportDesc">Fahrt zum Flughafen mit Fahrer anfragen.</p>
+<button onclick="chooseService('airport')" data-t="request">Fahrt anfragen</button>
+</article>
+</div>
+
+<section class="panel" id="requestPanel">
+<h2 data-t="makeRequest">Anfrage erstellen</h2>
+<p data-t="formInfo">Wähle einen Service und gib deine Angaben ein.</p>
+<form id="requestForm">
+<label data-t="serviceLabel" for="service">Dienstleistung</label>
+<select id="service">
+<option value="garden" data-t="gardenOption">Gartenhilfe</option>
+<option value="moving" data-t="movingOption">Umzug & Möbelmontage</option>
+<option value="airport" data-t="airportOption">Flughafentransfer</option>
+</select>
+
+<label data-t="pickupLabel" for="pickup">Abholadresse / Ort</label>
+<input id="pickup" required placeholder="z. B. Merseburg">
+
+<label data-t="destinationLabel" for="destination">Zieladresse</label>
+<input id="destination" required placeholder="Ziel oder kurze Beschreibung">
+
+<div id="travelFields">
+<label data-t="dateLabel" for="date">Datum</label>
+<input id="date" type="date">
+<label data-t="timeLabel" for="time">Uhrzeit</label>
+<input id="time" type="time">
+<label data-t="passengersLabel" for="passengers">Personen</label>
+<input id="passengers" type="number" min="1" value="2">
+<label data-t="luggageLabel" for="luggage">Gepäckstücke</label>
+<input id="luggage" type="number" min="0" value="2">
+</div>
+
+<label data-t="notesLabel" for="notes">Weitere Angaben</label>
+<input id="notes" placeholder="Weitere Informationen">
+<button type="submit" data-t="send">Anfrage senden</button>
+</form>
+<div id="message" role="status"></div>
+</section>
+
+<section class="panel">
+<h2 data-t="account">Kundenkonto</h2>
+<p data-t="accountInfo">Registrieren oder anmelden, um dein Konto zu nutzen.</p>
+<form id="authForm">
+<label data-t="emailLabel" for="email">E-Mail</label>
+<input id="email" type="email" required autocomplete="email">
+<label data-t="passwordLabel" for="password">Passwort</label>
+<input id="password" type="password" required minlength="8" autocomplete="current-password">
+<div style="display:flex;gap:10px;flex-wrap:wrap">
+<button type="button" onclick="auth('login')" data-t="login">Anmelden</button>
+<button type="button" onclick="auth('register')" data-t="register">Registrieren</button>
+<button type="button" onclick="auth('logout')" data-t="logout">Abmelden</button>
+</div>
+</form>
+<div id="authMessage" role="status"></div>
+</section>
+</main>
+<footer>© 2026 HelferFix</footer>
+
+<script>
+const translations={
+de:{
+title:"Hilfe, wenn du sie brauchst.",subtitle:"Zuverlässige Hilfe vor Ort – einfach anfragen.",explore:"Services entdecken",services:"Unsere Dienstleistungen",
+garden:"🌿 Gartenhilfe",gardenDesc:"Hilfe bei Gartenarbeit und Pflege.",moving:"🪑 Umzug & Möbelmontage",movingDesc:"Unterstützung beim Umzug und Möbelaufbau.",airport:"🚗 Flughafentransfer",airportDesc:"Fahrt zum Flughafen mit Fahrer anfragen.",request:"Hilfe anfragen",makeRequest:"Anfrage erstellen",formInfo:"Wähle einen Service und gib deine Angaben ein.",serviceLabel:"Dienstleistung",gardenOption:"Gartenhilfe",movingOption:"Umzug & Möbelmontage",airportOption:"Flughafentransfer",pickupLabel:"Abholadresse / Ort",destinationLabel:"Zieladresse",dateLabel:"Datum",timeLabel:"Uhrzeit",passengersLabel:"Personen",luggageLabel:"Gepäckstücke",notesLabel:"Weitere Angaben",send:"Anfrage senden",account:"Kundenkonto",accountInfo:"Registrieren oder anmelden, um dein Konto zu nutzen.",emailLabel:"E-Mail",passwordLabel:"Passwort",login:"Anmelden",register:"Registrieren",logout:"Abmelden",choose:"Bitte wähle zuerst einen Service.",sent:"Anfrage wurde gesendet!",failed:"Fehler beim Senden. Bitte versuche es erneut.",authOk:"Aktion erfolgreich.",authFail:"Aktion fehlgeschlagen. Bitte prüfe deine Angaben.",localOnly:"Diese Dienstleistung kann noch nicht online gespeichert werden. Bitte kontaktiere uns später erneut.",needAirport:"Bitte Datum und Uhrzeit für den Flughafentransfer angeben.",authFirst:"Bitte melde dich an oder registriere dich zuerst."
+},
+ar:{
+title:"المساعدة عندما تحتاج إليها.",subtitle:"خدمات موثوقة بالقرب منك — اطلب المساعدة بسهولة.",explore:"اكتشف الخدمات",services:"خدماتنا",
+garden:"🌿 مساعدة في الحديقة",gardenDesc:"مساعدة في أعمال الحديقة والعناية بها.",moving:"🪑 نقل الأثاث وتركيبه",movingDesc:"مساعدة في النقل وتجميع الأثاث.",airport:"🚗 توصيل إلى المطار",airportDesc:"اطلب رحلة إلى المطار مع سائق.",request:"اطلب المساعدة",makeRequest:"إنشاء طلب",formInfo:"اختر الخدمة وأدخل معلوماتك.",serviceLabel:"الخدمة",gardenOption:"مساعدة في الحديقة",movingOption:"نقل الأثاث وتركيبه",airportOption:"توصيل إلى المطار",pickupLabel:"عنوان الانطلاق / المكان",destinationLabel:"عنوان الوجهة",dateLabel:"التاريخ",timeLabel:"الوقت",passengersLabel:"عدد الأشخاص",luggageLabel:"عدد الحقائب",notesLabel:"معلومات إضافية",send:"إرسال الطلب",account:"حساب العميل",accountInfo:"سجّل حسابًا أو سجّل الدخول لاستخدام حسابك.",emailLabel:"البريد الإلكتروني",passwordLabel:"كلمة المرور",login:"تسجيل الدخول",register:"إنشاء حساب",logout:"تسجيل الخروج",choose:"يرجى اختيار الخدمة أولًا.",sent:"تم إرسال الطلب!",failed:"حدث خطأ أثناء الإرسال. حاول مجددًا.",authOk:"تمت العملية بنجاح.",authFail:"فشلت العملية. تحقق من المعلومات.",localOnly:"لا يمكن حفظ طلب هذه الخدمة عبر الإنترنت حاليًا.",needAirport:"يرجى إدخال تاريخ ووقت رحلة المطار.",authFirst:"يرجى تسجيل الدخول أو إنشاء حساب أولًا."
+},
+en:{
+title:"Help when you need it.",subtitle:"Reliable local help — request it easily.",explore:"Explore services",services:"Our services",
+garden:"🌿 Garden help",gardenDesc:"Help with gardening and maintenance.",moving:"🪑 Moving & furniture assembly",movingDesc:"Support with moving and assembling furniture.",airport:"🚗 Airport transfer",airportDesc:"Request a driver for your airport trip.",request:"Request help",makeRequest:"Create a request",formInfo:"Choose a service and enter your details.",serviceLabel:"Service",gardenOption:"Garden help",movingOption:"Moving & furniture assembly",airportOption:"Airport transfer",pickupLabel:"Pickup address / location",destinationLabel:"Destination",dateLabel:"Date",timeLabel:"Time",passengersLabel:"Passengers",luggageLabel:"Bags",notesLabel:"Additional details",send:"Send request",account:"Customer account",accountInfo:"Register or log in to use your account.",emailLabel:"Email",passwordLabel:"Password",login:"Log in",register:"Register",logout:"Log out",choose:"Please choose a service first.",sent:"Request sent!",failed:"Sending failed. Please try again.",authOk:"Action successful.",authFail:"Action failed. Please check your details.",localOnly:"Online saving for this service is not available yet.",needAirport:"Please enter the airport transfer date and time.",authFirst:"Please log in or register first."
+}
+};
+
+const $=id=>document.getElementById(id);
+let currentUser=null;
+
+function setLanguage(lang){
+const t=translations[lang]||translations.de;
+document.documentElement.lang=lang;
+document.documentElement.dir=lang==="ar"?"rtl":"ltr";
+document.querySelectorAll("[data-t]").forEach(el=>{
+const key=el.dataset.t;
+if(t[key])el.textContent=t[key];
+});
+$("language").value=lang;
+}
+$("language").addEventListener("change",e=>setLanguage(e.target.value));
+setLanguage("de");
+
+function chooseService(service){
+$("service").value=service;
+$("requestPanel").scrollIntoView({behavior:"smooth"});
+$("travelFields").classList.toggle("hidden",service!=="airport");
+}
+$("service").addEventListener("change",e=>{
+$("travelFields").classList.toggle("hidden",e.target.value!=="airport");
+});
+chooseService("airport");
+
+async function auth(action){
+const t=translations[$("language").value]||translations.de;
+const output=$("authMessage");
+output.textContent="";
+try{
+const endpoint=action==="logout"?"/api/auth/logout":"/api/auth/"+action;
+const options={method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin"};
+if(action!=="logout")options.body=JSON.stringify({email:$("email").value,password:$("password").value});
+const response=await fetch(endpoint,options);
+const data=await response.json();
+if(!response.ok)throw new Error(data.error||"Request failed");
+currentUser=action==="logout"?null:(data.user||currentUser);
+output.textContent=t.authOk;
+}catch(err){output.textContent=t.authFail+" ("+err.message+")";}
+}
+
+$("requestForm").addEventListener("submit",async e=>{
+e.preventDefault();
+const t=translations[$("language").value]||translations.de;
+const service=$("service").value;
+const message=$("message");
+message.textContent="";
+if(service!=="airport"){
+message.textContent=t.localOnly;
+return;
+}
+if(!$("date").value||!$("time").value){
+message.textContent=t.needAirport;
+return;
+}
+try{
+const response=await fetch("/api/rides",{
+method:"POST",
+headers:{"Content-Type":"application/json"},
+credentials:"same-origin",
+body:JSON.stringify({
+serviceType:"airport",
+pickup:$("pickup").value,
+destination:$("destination").value,
+travelDate:$("date").value,
+travelTime:$("time").value,
+passengers:Number($("passengers").value),
+luggage:Number($("luggage").value),
+vehicleType:"car",
+notes:$("notes").value
+})
+});
+const data=await response.json();
+if(!response.ok)throw new Error(data.error||"Request failed");
+message.textContent=t.sent;
+$("requestForm").reset();
+}catch(err){
+message.textContent=t.failed+" "+(err.message||"");
+}
+});
+</script>
 </body>
 </html>
