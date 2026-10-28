@@ -10,28 +10,39 @@
 :root{font-family:Arial,sans-serif;color:#172033;background:#f3f6f4}
 *{box-sizing:border-box}
 body{margin:0}
-header{background:#166534;color:white;padding:22px 16px}
-nav,main,footer{max-width:850px;margin:auto}
+header{background:#166534;color:white;padding:18px 14px}
+nav,main,footer{max-width:1000px;margin:auto}
 nav{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .brand{font-size:25px;font-weight:bold}
 main{padding:20px 14px}
 section,.service{background:white;border:1px solid #e0e7e2;border-radius:14px;padding:18px;margin-bottom:18px}
 h1{font-size:27px;margin:5px 0 10px}
 h2{font-size:21px;margin-top:0}
-p{line-height:1.5}
+p{line-height:1.5;overflow-wrap:anywhere}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
-.service{margin:0;cursor:pointer}
+.service{margin:0;cursor:pointer;min-width:0}
 .service.selected{border:2px solid #15803d;background:#f0fdf4}
 label{display:block;font-weight:bold;margin:12px 0 5px}
-input,select,textarea{display:block;width:100%;padding:12px;border:1px solid #cbd5d1;border-radius:8px;font:inherit;background:white}
+input,select,textarea{display:block;width:100%;padding:12px;border:1px solid #cbd5d1;border-radius:8px;font:inherit;background:white;color:#172033}
 textarea{min-height:85px;resize:vertical}
-button{background:#166534;color:white;border:0;border-radius:8px;padding:12px 16px;font:inherit;cursor:pointer}
+button{background:#166534;color:white;border:0;border-radius:8px;padding:12px 16px;font:inherit;cursor:pointer;margin:3px}
 button.secondary{background:#e5eee7;color:#14532d}
+button:disabled{opacity:.6;cursor:wait}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-.notice{margin-top:12px;padding:10px;background:#f0fdf4;border-radius:8px;overflow-wrap:anywhere}
+.notice{margin-top:12px;padding:12px;background:#f0fdf4;border-radius:8px;overflow-wrap:anywhere;white-space:pre-wrap}
+.error{background:#fff1f2;color:#9f1239}
 small{color:#52615a}
 footer{text-align:center;padding:20px;color:#52615a}
 [hidden]{display:none!important}
+.admin-row{margin:12px 0;padding:14px;border:1px solid #dce5df;border-radius:10px;background:#fff}
+.admin-row select{margin:8px 0}
+.stat{background:#f0fdf4;border:1px solid #bbf7d0;padding:14px;border-radius:10px}
+.stat strong{font-size:24px;display:block;margin-top:6px}
+@media(max-width:480px){
+  main{padding:12px 9px}
+  section{padding:14px}
+  button{max-width:100%}
+}
 </style>
 </head>
 <body>
@@ -87,10 +98,10 @@ footer{text-align:center;padding:20px;color:#52615a}
 </select>
 
 <label for="pickup" data-t="pickup">Startadresse / Ort</label>
-<input id="pickup" required maxlength="180" placeholder="">
+<input id="pickup" required maxlength="180">
 
 <label for="destination" data-t="destination">Zieladresse oder Beschreibung</label>
-<input id="destination" required maxlength="180" placeholder="">
+<input id="destination" required maxlength="180">
 
 <div id="airportFields" hidden>
 <label for="date" data-t="date">Datum</label>
@@ -105,6 +116,13 @@ footer{text-align:center;padding:20px;color:#52615a}
 <label for="luggage" data-t="luggage">Gepäckstücke</label>
 <input id="luggage" type="number" min="0" max="20" value="0" required>
 
+<label for="vehicle" data-t="vehicle">Fahrzeug</label>
+<select id="vehicle">
+<option value="PKW">PKW</option>
+<option value="Van">Van</option>
+<option value="egal" data-t="anyVehicle">Egal</option>
+</select>
+
 <label for="notes" data-t="notes">Zusätzliche Angaben</label>
 <textarea id="notes" maxlength="1000"></textarea>
 
@@ -117,6 +135,8 @@ footer{text-align:center;padding:20px;color:#52615a}
 
 <section>
 <h2 data-t="account">Kundenkonto</h2>
+<div id="sessionInfo" class="notice" hidden></div>
+
 <form id="authForm">
 <label for="name" data-t="name">Name</label>
 <input id="name" maxlength="100" autocomplete="name">
@@ -141,6 +161,30 @@ footer{text-align:center;padding:20px;color:#52615a}
 </form>
 <div id="authMessage" class="notice" hidden role="status"></div>
 </section>
+
+<!-- Admin panel: visible only to an authenticated admin -->
+<section id="adminPanel" hidden>
+<h2>🔐 HelferFix – Adminbereich</h2>
+<p id="adminWelcome">Administrator</p>
+
+<div class="grid">
+<div class="stat">Alle Benutzer<strong id="adminUsersCount">0</strong></div>
+<div class="stat">Kunden<strong id="adminCustomersCount">0</strong></div>
+<div class="stat">Fahrer<strong id="adminDriversCount">0</strong></div>
+<div class="stat">Alle Anfragen<strong id="adminRidesCount">0</strong></div>
+<div class="stat">Neue Anfragen<strong id="adminNewRidesCount">0</strong></div>
+</div>
+
+<div class="actions">
+<button type="button" onclick="loadAdmin()">Aktualisieren</button>
+<button type="button" class="secondary" onclick="showAdminTab('users')">Benutzer verwalten</button>
+<button type="button" class="secondary" onclick="showAdminTab('rides')">Anfragen verwalten</button>
+<button type="button" class="secondary" onclick="showAdminTab('settings')">Einstellungen</button>
+</div>
+
+<div id="adminMessage" class="notice" hidden role="status"></div>
+<div id="adminContent" aria-live="polite"></div>
+</section>
 </main>
 
 <footer>© 2026 HelferFix</footer>
@@ -157,12 +201,13 @@ airport:"🚗 Flughafentransfer",airportDesc:"Fahrt zum Flughafen mit Fahrer.",
 request:"Anfragen",makeRequest:"Anfrage erstellen",requestInfo:"Fülle die Angaben aus.",
 serviceLabel:"Dienstleistung",gardenOption:"Gartenhilfe",movingOption:"Umzug und Möbelmontage",airportOption:"Flughafentransfer",
 pickup:"Startadresse / Ort",destination:"Zieladresse oder Beschreibung",date:"Datum",time:"Uhrzeit",
-passengers:"Personen",luggage:"Gepäckstücke",notes:"Zusätzliche Angaben",send:"Anfrage senden",
+passengers:"Personen",luggage:"Gepäckstücke",vehicle:"Fahrzeug",anyVehicle:"Egal",
+notes:"Zusätzliche Angaben",send:"Anfrage senden",
 account:"Kundenkonto",name:"Name",email:"E-Mail",password:"Passwort (mindestens 10 Zeichen)",
 role:"Kontotyp",customer:"Kunde",driver:"Fahrer",register:"Registrieren",login:"Anmelden",logout:"Abmelden",
-authOk:"Aktion erfolgreich.",authError:"Fehler bei der Anmeldung oder Registrierung.",
+authOk:"Aktion erfolgreich.",authError:"Anmeldung oder Registrierung fehlgeschlagen.",
 sent:"Anfrage wurde gesendet.",failed:"Anfrage fehlgeschlagen.",
-airportFields:"Bitte Datum und Uhrzeit angeben.",loading:"Bitte warten..."
+loading:"Bitte warten..."
 },
 ar:{
 title:"المساعدة عندما تحتاج إليها",subtitle:"مساعدة موثوقة بالقرب منك — اطلبها بسهولة.",
@@ -172,12 +217,13 @@ airport:"🚗 توصيل إلى المطار",airportDesc:"رحلة إلى ال�
 request:"اطلب الخدمة",makeRequest:"إنشاء طلب",requestInfo:"يرجى تعبئة المعلومات.",
 serviceLabel:"الخدمة",gardenOption:"مساعدة في الحديقة",movingOption:"نقل الأثاث وتركيبه",airportOption:"التوصيل إلى المطار",
 pickup:"عنوان الانطلاق / المكان",destination:"الوجهة أو وصف الطلب",date:"التاريخ",time:"الوقت",
-passengers:"عدد الأشخاص",luggage:"عدد الحقائب",notes:"معلومات إضافية",send:"إرسال الطلب",
+passengers:"عدد الأشخاص",luggage:"عدد الحقائب",vehicle:"نوع المركبة",anyVehicle:"لا يهم",
+notes:"معلومات إضافية",send:"إرسال الطلب",
 account:"حساب العميل",name:"الاسم",email:"البريد الإلكتروني",password:"كلمة المرور (10 أحرف على الأقل)",
 role:"نوع الحساب",customer:"زبون",driver:"سائق",register:"إنشاء حساب",login:"تسجيل الدخول",logout:"تسجيل الخروج",
 authOk:"تمت العملية بنجاح.",authError:"حدث خطأ أثناء التسجيل أو الدخول.",
 sent:"تم إرسال الطلب.",failed:"تعذر إرسال الطلب.",
-airportFields:"يرجى إدخال التاريخ والوقت.",loading:"يرجى الانتظار..."
+loading:"يرجى الانتظار..."
 },
 en:{
 title:"Help when you need it.",subtitle:"Reliable local help — request it easily.",
@@ -187,129 +233,423 @@ airport:"🚗 Airport transfer",airportDesc:"Request a driver for your airport t
 request:"Request service",makeRequest:"Create a request",requestInfo:"Please fill in the details.",
 serviceLabel:"Service",gardenOption:"Garden help",movingOption:"Moving and furniture assembly",airportOption:"Airport transfer",
 pickup:"Pickup address / location",destination:"Destination or request description",date:"Date",time:"Time",
-passengers:"Passengers",luggage:"Bags",notes:"Additional details",send:"Send request",
+passengers:"Passengers",luggage:"Bags",vehicle:"Vehicle",anyVehicle:"Any",
+notes:"Additional details",send:"Send request",
 account:"Customer account",name:"Name",email:"Email",password:"Password (at least 10 characters)",
 role:"Account type",customer:"Customer",driver:"Driver",register:"Register",login:"Log in",logout:"Log out",
 authOk:"Action successful.",authError:"Registration or login failed.",
 sent:"Request sent.",failed:"Request failed.",
-airportFields:"Please enter the date and time.",loading:"Please wait..."
+loading:"Please wait..."
 }
 };
 
+let adminTab = "users";
+let currentUser = null;
+
 function setLanguage(lang){
-const t=translations[lang]||translations.de;
-document.documentElement.lang=lang;
-document.documentElement.dir=lang==="ar"?"rtl":"ltr";
-document.querySelectorAll("[data-t]").forEach(el=>{
-const key=el.dataset.t;
-if(t[key]) el.textContent=t[key];
-});
-updateAirportFields();
+ const t = translations[lang] || translations.de;
+ document.documentElement.lang = lang;
+ document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
+ document.querySelectorAll("[data-t]").forEach(el=>{
+   const key = el.dataset.t;
+   if(t[key]) el.textContent = t[key];
+ });
+ updateAirportFields();
+}
+
+function showMessage(id, message, isError=false){
+ const el = $(id);
+ el.hidden = false;
+ el.textContent = message;
+ el.classList.toggle("error", isError);
 }
 
 function chooseService(service){
-$("service").value=service;
-document.querySelectorAll(".service").forEach(el=>{
-const selected=el.dataset.service===service;
-el.classList.toggle("selected",selected);
-el.setAttribute("aria-pressed",String(selected));
-});
-updateAirportFields();
-$("requestForm").scrollIntoView({behavior:"smooth",block:"start"});
+ $("service").value = service;
+ document.querySelectorAll(".service[data-service]").forEach(el=>{
+   const selected = el.dataset.service === service;
+   el.classList.toggle("selected", selected);
+   el.setAttribute("aria-pressed", String(selected));
+ });
+ updateAirportFields();
+ $("requestForm").scrollIntoView({behavior:"smooth",block:"start"});
 }
 
 function updateAirportFields(){
-const airport=$("service").value==="airport";
-$("airportFields").hidden=!airport;
-$("date").required=airport;
-$("time").required=airport;
+ const airport = $("service").value === "airport";
+ $("airportFields").hidden = !airport;
+ $("date").required = airport;
+ $("time").required = airport;
+ $("vehicle").disabled = !airport;
 }
 
-$("language").addEventListener("change",e=>setLanguage(e.target.value));
-$("service").addEventListener("change",updateAirportFields);
+$("language").addEventListener("change", e=>setLanguage(e.target.value));
+$("service").addEventListener("change", updateAirportFields);
 
-document.querySelectorAll(".service").forEach(el=>{
-el.addEventListener("click",e=>{
-if(e.target.closest("button"))return;
-chooseService(el.dataset.service);
+document.querySelectorAll(".service[data-service]").forEach(el=>{
+ el.addEventListener("click", e=>{
+   if(e.target.closest("button")) return;
+   chooseService(el.dataset.service);
+ });
+ el.addEventListener("keydown", e=>{
+   if(e.key === "Enter" || e.key === " "){
+     e.preventDefault();
+     chooseService(el.dataset.service);
+   }
+ });
 });
-el.addEventListener("keydown",e=>{
-if(e.key==="Enter"||e.key===" "){
-e.preventDefault();
-chooseService(el.dataset.service);
+
+async function api(url, options={}){
+ const response = await fetch(url,{
+   credentials:"same-origin",
+   ...options,
+   headers:{
+     ...(options.body ? {"Content-Type":"application/json"} : {}),
+     ...(options.headers || {})
+   }
+ });
+ const data = await response.json().catch(()=>({error:"Ungültige Serverantwort."}));
+ if(!response.ok) throw new Error(data.error || ("HTTP "+response.status));
+ return data;
 }
-});
-});
 
 async function auth(action){
-const t=translations[$("language").value]||translations.de;
-const out=$("authMessage");
-out.hidden=false;
-out.textContent=t.loading;
+ const t = translations[$("language").value] || translations.de;
+ const out = $("authMessage");
+ out.hidden = false;
+ out.classList.remove("error");
+ out.textContent = t.loading;
 
-const body=action==="register"
-?{name:$("name").value.trim(),email:$("email").value.trim(),password:$("password").value,role:$("role").value}
-:action==="login"
-?{email:$("email").value.trim(),password:$("password").value}
-:{};
+ const body = action === "register"
+   ? {
+       name:$("name").value.trim(),
+       email:$("email").value.trim(),
+       password:$("password").value,
+       role:$("role").value
+     }
+   : action === "login"
+   ? {
+       email:$("email").value.trim(),
+       password:$("password").value
+     }
+   : {};
 
-try{
-const response=await fetch("/api/auth/"+action,{
-method:"POST",
-credentials:"same-origin",
-headers:{"Content-Type":"application/json"},
-body:JSON.stringify(body)
-});
-const data=await response.json();
-if(!response.ok)throw new Error(data.error||"HTTP "+response.status);
-out.textContent=data.message||t.authOk;
-if(action==="logout")out.textContent=data.message||t.authOk;
-}catch(err){
-out.textContent=t.authError+" ("+err.message+")";
-}
+ try{
+   const data = await api("/api/auth/"+action,{
+     method:"POST",
+     body:JSON.stringify(body)
+   });
+
+   if(action === "logout"){
+     currentUser = null;
+     $("adminPanel").hidden = true;
+     $("sessionInfo").hidden = true;
+     showMessage("authMessage",data.message || t.authOk);
+     return;
+   }
+
+   currentUser = data.user || null;
+   $("password").value = "";
+   showMessage("authMessage",data.message || t.authOk);
+
+   if(currentUser){
+     $("sessionInfo").hidden = false;
+     $("sessionInfo").textContent =
+       "Angemeldet: " + currentUser.name + " (" + currentUser.role + ")";
+   }
+
+   if(currentUser && currentUser.role === "admin"){
+     $("adminPanel").hidden = false;
+     $("adminWelcome").textContent = "Angemeldet als: " + currentUser.email;
+     await loadAdmin();
+     $("adminPanel").scrollIntoView({behavior:"smooth",block:"start"});
+   }else{
+     $("adminPanel").hidden = true;
+   }
+ }catch(err){
+   showMessage("authMessage",t.authError+" ("+err.message+")",true);
+ }
 }
 
 $("requestForm").addEventListener("submit",async e=>{
-e.preventDefault();
-const t=translations[$("language").value]||translations.de;
-const out=$("requestMessage");
-const service=$("service").value;
-out.hidden=false;
-out.textContent=t.loading;
+ e.preventDefault();
+ const t = translations[$("language").value] || translations.de;
+ const service = $("service").value;
 
-const payload={
-serviceType:service,
-pickup:$("pickup").value.trim(),
-destination:$("destination").value.trim(),
-travelDate:service==="airport"?$("date").value:"",
-travelTime:service==="airport"?$("time").value:"",
-passengers:Number($("passengers").value),
-luggage:Number($("luggage").value),
-vehicleType:service==="airport"?"PKW":"egal",
-notes:$("notes").value.trim()
-};
+ showMessage("requestMessage",t.loading);
 
-try{
-const response=await fetch("/api/rides",{
-method:"POST",
-credentials:"same-origin",
-headers:{"Content-Type":"application/json"},
-body:JSON.stringify(payload)
+ const payload = {
+   serviceType:service,
+   pickup:$("pickup").value.trim(),
+   destination:$("destination").value.trim(),
+   travelDate:service === "airport" ? $("date").value : "",
+   travelTime:service === "airport" ? $("time").value : "",
+   passengers:Number($("passengers").value),
+   luggage:Number($("luggage").value),
+   vehicleType:service === "airport" ? $("vehicle").value : "egal",
+   notes:$("notes").value.trim()
+ };
+
+ try{
+   const data = await api("/api/rides",{
+     method:"POST",
+     body:JSON.stringify(payload)
+   });
+
+   showMessage("requestMessage",t.sent+" "+(data.message || ""));
+   $("requestForm").reset();
+   $("passengers").value = 1;
+   $("luggage").value = 0;
+   chooseService(service);
+ }catch(err){
+   showMessage("requestMessage",t.failed+" ("+err.message+")",true);
+ }
 });
-const data=await response.json();
-if(!response.ok)throw new Error(data.error||"HTTP "+response.status);
-out.textContent=t.sent+" "+(data.message||"");
-$("requestForm").reset();
-$("passengers").value=1;
-$("luggage").value=0;
-chooseService(service);
-}catch(err){
-out.textContent=t.failed+" ("+err.message+")";
+
+function clearElement(el){
+ while(el.firstChild) el.removeChild(el.firstChild);
 }
-});
+
+function addText(parent, tag, text, className=""){
+ const el = document.createElement(tag);
+ el.textContent = text == null ? "" : String(text);
+ if(className) el.className = className;
+ parent.appendChild(el);
+ return el;
+}
+
+async function loadAdmin(){
+ const message = $("adminMessage");
+ message.hidden = true;
+
+ try{
+   const me = await api("/api/me");
+   currentUser = me.user;
+
+   if(!currentUser || currentUser.role !== "admin"){
+     $("adminPanel").hidden = true;
+     throw new Error("Kein Administrator angemeldet.");
+   }
+
+   $("adminPanel").hidden = false;
+   $("adminWelcome").textContent = "Angemeldet als: " + currentUser.email;
+
+   const data = await api("/api/admin/summary");
+   $("adminUsersCount").textContent = data.users;
+   $("adminCustomersCount").textContent = data.customers;
+   $("adminDriversCount").textContent = data.drivers;
+   $("adminRidesCount").textContent = data.rides;
+   $("adminNewRidesCount").textContent = data.newRides;
+
+   await showAdminTab(adminTab);
+ }catch(err){
+   showMessage("adminMessage",err.message,true);
+ }
+}
+
+async function showAdminTab(tab){
+ adminTab = tab;
+ const content = $("adminContent");
+ clearElement(content);
+ addText(content,"p","Lädt...");
+
+ try{
+   if(tab === "users"){
+     const data = await api("/api/admin/users");
+     clearElement(content);
+     addText(content,"h3","Benutzerverwaltung");
+
+     if(!data.users.length){
+       addText(content,"p","Keine Benutzer vorhanden.");
+       return;
+     }
+
+     data.users.forEach(user=>{
+       const row = document.createElement("div");
+       row.className = "admin-row";
+       addText(row,"strong",user.name);
+       addText(row,"p",user.email);
+       addText(row,"p","Rolle: "+user.role+" | Status: "+(user.active ? "Aktiv" : "Deaktiviert"));
+
+       if(user.role !== "admin"){
+         const btn = document.createElement("button");
+         btn.textContent = user.active ? "Konto deaktivieren" : "Konto aktivieren";
+         btn.onclick = async ()=>{
+           btn.disabled = true;
+           try{
+             await api("/api/admin/users/"+user.id,{
+               method:"PATCH",
+               body:JSON.stringify({active:!user.active})
+             });
+             await loadAdmin();
+           }catch(err){
+             showMessage("adminMessage",err.message,true);
+             btn.disabled = false;
+           }
+         };
+         row.appendChild(btn);
+       }
+
+       content.appendChild(row);
+     });
+
+   }else if(tab === "rides"){
+     const data = await api("/api/admin/rides");
+     clearElement(content);
+     addText(content,"h3","Serviceanfragen");
+
+     if(!data.rides.length){
+       addText(content,"p","Noch keine Anfragen vorhanden.");
+       return;
+     }
+
+     data.rides.forEach(ride=>{
+       const row = document.createElement("div");
+       row.className = "admin-row";
+
+       addText(row,"strong","#"+ride.id+" — "+ride.service_type);
+       addText(row,"p","Kunde: "+ride.customer_name+" ("+ride.customer_email+")");
+       addText(row,"p","Start: "+ride.pickup);
+       addText(row,"p","Ziel: "+ride.destination);
+       addText(row,"p","Datum: "+(ride.travel_date || "Nicht angegeben")+
+         " | Uhrzeit: "+(ride.travel_time || "Nicht angegeben"));
+       addText(row,"p","Personen: "+ride.passengers+
+         " | Gepäck: "+ride.luggage+
+         " | Fahrzeug: "+ride.vehicle_type);
+       if(ride.notes) addText(row,"p","Notizen: "+ride.notes);
+       addText(row,"p","Erstellt: "+ride.created_at);
+
+       const label = document.createElement("label");
+       label.textContent = "Status";
+       row.appendChild(label);
+
+       const select = document.createElement("select");
+       [
+         ["new","Neu"],
+         ["quoted","Angebot vorhanden"],
+         ["accepted","Angenommen"],
+         ["cancelled","Storniert"],
+         ["completed","Abgeschlossen"]
+       ].forEach(([value,labelText])=>{
+         const option = document.createElement("option");
+         option.value = value;
+         option.textContent = labelText;
+         select.appendChild(option);
+       });
+       select.value = ride.status;
+       row.appendChild(select);
+
+       const btn = document.createElement("button");
+       btn.textContent = "Status speichern";
+       btn.onclick = async ()=>{
+         btn.disabled = true;
+         try{
+           const result = await api("/api/admin/rides/"+ride.id,{
+             method:"PATCH",
+             body:JSON.stringify({status:select.value})
+           });
+           showMessage("adminMessage",result.message || "Gespeichert.");
+           await loadAdmin();
+         }catch(err){
+           showMessage("adminMessage",err.message,true);
+           btn.disabled = false;
+         }
+       };
+       row.appendChild(btn);
+       content.appendChild(row);
+     });
+
+   }else if(tab === "settings"){
+     const data = await api("/api/admin/settings");
+     const s = data.settings;
+     clearElement(content);
+     addText(content,"h3","Websiteeinstellungen");
+
+     const nameLabel = addText(content,"label","Website-Name");
+     nameLabel.htmlFor = "settingName";
+     const nameInput = document.createElement("input");
+     nameInput.id = "settingName";
+     nameInput.maxLength = 80;
+     nameInput.value = s.site_name;
+     content.appendChild(nameInput);
+
+     const emailLabel = addText(content,"label","Support-E-Mail");
+     emailLabel.htmlFor = "settingEmail";
+     const emailInput = document.createElement("input");
+     emailInput.id = "settingEmail";
+     emailInput.type = "email";
+     emailInput.maxLength = 254;
+     emailInput.value = s.support_email;
+     content.appendChild(emailInput);
+
+     const feeLabel = addText(content,"label","Plattformgebühr (%)");
+     feeLabel.htmlFor = "settingFee";
+     const feeInput = document.createElement("input");
+     feeInput.id = "settingFee";
+     feeInput.type = "number";
+     feeInput.min = "0";
+     feeInput.max = "30";
+     feeInput.step = "0.1";
+     feeInput.value = s.platform_fee_percent;
+     content.appendChild(feeInput);
+
+     addText(content,"p","Die Gebühr wird derzeit nur gespeichert; eine tatsächliche Zahlungsabwicklung ist nicht eingerichtet.");
+
+     const btn = document.createElement("button");
+     btn.textContent = "Einstellungen speichern";
+     btn.onclick = async ()=>{
+       btn.disabled = true;
+       try{
+         const result = await api("/api/admin/settings",{
+           method:"PUT",
+           body:JSON.stringify({
+             site_name:$("settingName").value.trim(),
+             support_email:$("settingEmail").value.trim(),
+             platform_fee_percent:Number($("settingFee").value)
+           })
+         });
+         showMessage("adminMessage",result.message || "Gespeichert.");
+       }catch(err){
+         showMessage("adminMessage",err.message,true);
+       }finally{
+         btn.disabled = false;
+       }
+     };
+     content.appendChild(btn);
+   }
+ }catch(err){
+   clearElement(content);
+   addText(content,"p",err.message,"error");
+ }
+}
+
+// Restore an existing session after refreshing the page.
+async function restoreSession(){
+ try{
+   const data = await api("/api/me");
+   currentUser = data.user || null;
+
+   if(currentUser){
+     $("sessionInfo").hidden = false;
+     $("sessionInfo").textContent =
+       "Angemeldet: "+currentUser.name+" ("+currentUser.role+")";
+   }
+
+   if(currentUser && currentUser.role === "admin"){
+     $("adminPanel").hidden = false;
+     $("adminWelcome").textContent = "Angemeldet als: "+currentUser.email;
+     await loadAdmin();
+   }else{
+     $("adminPanel").hidden = true;
+   }
+ }catch(err){
+   $("adminPanel").hidden = true;
+ }
+}
 
 setLanguage("de");
-chooseService("garden");
+updateAirportFields();
+restoreSession();
 </script>
 </body>
 </html>
