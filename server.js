@@ -53,13 +53,14 @@ if (!rideColumns.includes('admin_approved_at')) db.exec('ALTER TABLE ride_reques
 if (!rideColumns.includes('accepted_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN accepted_at TEXT');
 if (!rideColumns.includes('commission_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN commission_cents INTEGER');
 if (!rideColumns.includes('driver_payout_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN driver_payout_cents INTEGER');
+const existingRideColumns = new Set(rideColumns);
 for (const [column, definition] of Object.entries({
  garden_task: 'TEXT', garden_size_m2: 'REAL', moving_task: 'TEXT',
  pickup_floor: 'TEXT', destination_floor: 'TEXT', pickup_elevator: 'INTEGER',
  destination_elevator: 'INTEGER', item_count: 'INTEGER', need_helpers: 'INTEGER', need_van: 'INTEGER',
  child_seats_needed: 'INTEGER NOT NULL DEFAULT 0', child_ages_heights: 'TEXT', child_seat_provider: 'TEXT'
 })) {
- if (!rideColumns.includes(column)) db.exec(`ALTER TABLE ride_requests ADD COLUMN ${column} ${definition}`);
+ if (!existingRideColumns.has(column)) { db.exec(`ALTER TABLE ride_requests ADD COLUMN ${column} ${definition}`); existingRideColumns.add(column); }
 }
 
 async function ensureAdmin() {
@@ -111,7 +112,7 @@ app.get('/api/health',(req,res)=>res.json({ok:true,app:'HelferFix',mode:'MVP',bo
 app.get('/api/me',(req,res)=>res.json({user:currentUser(req)}));
 app.post('/api/auth/register',async(req,res)=>{
  const name=clean(req.body.name,100),email=clean(req.body.email,254).toLowerCase(),password=typeof req.body.password==='string'?req.body.password:'',role=req.body.role;
- if(name.length<2||!emailOk(email)||password.length<8||password.length>200||!['customer','driver'].includes(role))return res.status(400).json({error:'Bitte Name, gültige E-Mail, Passwort (mind. 8 Zeichen) und Rolle korrekt angeben.'});
+ if(name.length<2||!emailOk(email)||password.length<10||password.length>200||!['customer','driver'].includes(role))return res.status(400).json({error:'Bitte Name, gültige E-Mail, Passwort (mind. 10 Zeichen) und Rolle korrekt angeben.'});
  try{const hash=await bcrypt.hash(password,12);const result=db.prepare('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,?)').run(name,email,hash,role);
   req.session.regenerate(err=>{if(err)return res.status(500).json({error:'Sitzung konnte nicht erstellt werden.'});req.session.userId=Number(result.lastInsertRowid);res.status(201).json({user:currentUser(req),message:'Konto erstellt. Fahrerangaben sind noch nicht geprüft.'});});
  }catch(e){if(String(e.code).includes('SQLITE_CONSTRAINT_UNIQUE'))return res.status(409).json({error:'Diese E-Mail-Adresse ist bereits registriert.'});console.error(e);res.status(500).json({error:'Registrierung fehlgeschlagen.'});}
@@ -160,7 +161,7 @@ app.post('/api/rides',requireRole('customer'),(req,res)=>{
  customer_id,service_type,pickup,destination,travel_date,travel_time,passengers,luggage,vehicle_type,notes,
  price_cents,commission_cents,driver_payout_cents,status,garden_task,garden_size_m2,moving_task,pickup_floor,destination_floor,
  pickup_elevator,destination_elevator,item_count,need_helpers,need_van,child_seats_needed,child_ages_heights,child_seat_provider
- ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+ ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?)`)
  .run(req.user.id,serviceType,pickup,destination,travelDate,travelTime,
   serviceType==='airport'?passengers:0,serviceType==='airport'?luggage:0,serviceType==='airport'?vehicleType:'',notes||null,
   cents,commission,cents-commission,gardenTask,gardenSize,movingTask,pickupFloor||null,destinationFloor||null,
