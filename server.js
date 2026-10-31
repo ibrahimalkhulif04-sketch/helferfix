@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
  ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE,
  sender_id INTEGER NOT NULL REFERENCES users(id),
  message TEXT NOT NULL CHECK(length(message) BETWEEN 1 AND 2000),
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_ride_id ON chat_messages(ride_request_id, id);
 CREATE TABLE IF NOT EXISTS chat_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT);
@@ -60,6 +61,10 @@ CREATE INDEX IF NOT EXISTS idx_app_notifications_recipient ON app_notifications(
 CREATE TABLE IF NOT EXISTS push_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, endpoint TEXT NOT NULL UNIQUE, subscription_json TEXT NOT NULL, language TEXT NOT NULL DEFAULT 'de', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);
 `);
+
+// Safe, additive migration: add delivery receipts without changing existing messages or accounts.
+const chatMessageColumns = db.prepare('PRAGMA table_info(chat_messages)').all().map(c => c.name);
+if (!chatMessageColumns.includes('delivered_at')) db.exec('ALTER TABLE chat_messages ADD COLUMN delivered_at TEXT');
 
 // Safe, additive migration: old accounts, requests and quote history remain in place.
 const rideColumns = db.prepare('PRAGMA table_info(ride_requests)').all().map(c => c.name);
@@ -138,8 +143,8 @@ async function sendPushToUser(userId, payload) {
 }
 function addUserNotification(userId, rideId, kind, status, messageId=null, actorId=null) {
  if (!userId || Number(userId)===Number(actorId)) return;
- db.prepare('INSERT INTO app_notifications(recipient_id,ride_request_id,kind,status,message_id) VALUES(?,?,?,?,?)').run(userId,rideId,kind,status||null,messageId);
- sendPushToUser(userId,{kind,status,rideId}).catch(()=>{});
+ const saved = db.prepare('INSERT INTO app_notifications(recipient_id,ride_request_id,kind,status,message_id) VALUES(?,?,?,?,?)').run(userId,rideId,kind,status||null,messageId);
+ sendPushToUser(userId,{kind,status,rideId,notificationId:Number(saved.lastInsertRowid)}).catch(()=>{});
 }
 function notifyRideStatus(ride, status, actorId, extraUserId=null) {
  if (!ride) return;
@@ -314,7 +319,9 @@ app.get('/api/rides/:id/messages',requireRole('customer','driver'),(req,res)=>{
  const id=Number(req.params.id); if(!Number.isInteger(id)||id<1)return res.status(400).json({error:'Ungültige Anfrage.'});
  const ride=getChatRide(id); if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
  if(!canUseChat(ride,req.user))return res.status(403).json({error:'Der Chat ist nur für den Kunden und den zugeordneten Fahrer eines angenommenen Auftrags verfügbar.'});
- const messages=db.prepare('SELECT m.id,m.sender_id,m.message,m.created_at,u.name AS sender_name FROM chat_messages m JOIN users u ON u.id=m.sender_id WHERE m.ride_request_id=? ORDER BY m.id DESC LIMIT 200').all(id).reverse();
+ // A message is delivered once its recipient has fetched it from the chat.
+ db.prepare('UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP) WHERE ride_request_id=? AND sender_id<>?').run(id,req.user.id);
+ const messages=db.prepare('SELECT m.id,m.sender_id,m.message,m.created_at,m.delivered_at,u.name AS sender_name FROM chat_messages m JOIN users u ON u.id=m.sender_id WHERE m.ride_request_id=? ORDER BY m.id DESC LIMIT 200').all(id).reverse();
  res.json({messages});
 });
 app.post('/api/rides/:id/messages',requireRole('customer','driver'),(req,res)=>{
