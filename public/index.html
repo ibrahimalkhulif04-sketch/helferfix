@@ -97,4 +97,12 @@ let notificationPollBusy=false;async function pollNotifications(){if(notificatio
 async function refreshPanels(){renderSignedIn();startNotificationPolling();if(!me)return;if(me.role==='customer')await loadCustomerRides();if(me.role==='driver')await loadDriver();if(me.role==='admin')await loadAdmin();}
 async function init(){setLanguage(lang);setMode('login');updateServiceFields();updateDateTimeMin();try{const d=await api('/api/me');me=d.user;renderSignedIn();await refreshPanels();}catch{me=null;renderSignedIn();}}
 init();
-</script></body></html>
+</script>
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js");
+  });
+}
+</script>
+</body></html>
