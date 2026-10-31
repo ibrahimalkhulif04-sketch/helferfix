@@ -1,27 +1,26 @@
 {
-  "background_color": "#ffffff",
-  "dir": "ltr",
-  "display": "standalone",
-  "name": "helferfix-test.onrender",
-  "orientation": "any",
-  "scope": "/",
-  "short_name": "helferfix.onrender",
+  "id": "/",
+  "name": "HelferFix",
+  "short_name": "HelferFix",
+  "description": "HelferFix – Deine Plattform für lokale Dienstleistungen und Alltagshilfe.",
   "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ffffff",
   "theme_color": "#176b4d",
   "icons": [
     {
-      "src": "https://helferfix-test.onrender.com/favicon.ico",
-      "type": "image/x-icon",
-      "isSquare": false,
-      "isPng": false,
-      "isWebp": false,
-      "isJpg": false,
-      "width": 0,
-      "is512x512": false,
-      "is256x256": false,
-      "is192x192": false
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
     }
-  ],
-  "id": "/",
-  "description": "HelferFix – Deine Plattform für vielfältige lokale Dienstleistungen und Alltagshilfe."
+  ]
 }
