@@ -8,6 +8,8 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
+let webPush = null;
+try { webPush = require('web-push'); } catch (e) { console.warn('web-push package is not installed; browser push is disabled until dependencies are installed.'); }
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -53,12 +55,11 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_ride_id ON chat_messages(ride_request_id, id);
 CREATE TABLE IF NOT EXISTS chat_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_chat_notifications_recipient ON chat_notifications(recipient_id, read_at, id);
+CREATE TABLE IF NOT EXISTS app_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('message','status')), status TEXT, message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_app_notifications_recipient ON app_notifications(recipient_id, read_at, id);
+CREATE TABLE IF NOT EXISTS push_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, endpoint TEXT NOT NULL UNIQUE, subscription_json TEXT NOT NULL, language TEXT NOT NULL DEFAULT 'de', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);
 `);
-
-// Add delivery/read timestamps without deleting existing chat history.
-const messageColumns = new Set(db.prepare('PRAGMA table_info(chat_messages)').all().map(c => c.name));
-if (!messageColumns.has('delivered_at')) db.exec('ALTER TABLE chat_messages ADD COLUMN delivered_at TEXT');
-if (!messageColumns.has('read_at')) db.exec('ALTER TABLE chat_messages ADD COLUMN read_at TEXT');
 
 // Safe, additive migration: old accounts, requests and quote history remain in place.
 const rideColumns = db.prepare('PRAGMA table_info(ride_requests)').all().map(c => c.name);
@@ -70,7 +71,6 @@ if (!rideColumns.includes('commission_cents')) db.exec('ALTER TABLE ride_request
 if (!rideColumns.includes('driver_payout_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN driver_payout_cents INTEGER');
 const existingRideColumns = new Set(rideColumns);
 if (!existingRideColumns.has('service_description')) { db.exec('ALTER TABLE ride_requests ADD COLUMN service_description TEXT'); existingRideColumns.add('service_description'); }
-if (!existingRideColumns.has('child_count')) { db.exec('ALTER TABLE ride_requests ADD COLUMN child_count INTEGER NOT NULL DEFAULT 0'); existingRideColumns.add('child_count'); }
 if (!existingRideColumns.has('garden_hours')) { db.exec('ALTER TABLE ride_requests ADD COLUMN garden_hours REAL'); existingRideColumns.add('garden_hours'); }
 for (const [column, definition] of Object.entries({
  garden_task: 'TEXT', garden_size_m2: 'REAL', moving_task: 'TEXT',
@@ -118,6 +118,35 @@ function requireRole(...roles) {
  return (req,res,next)=>{ const user=currentUser(req); if(!user||!user.active)return res.status(401).json({error:'Bitte melde dich an.'}); if(!roles.includes(user.role))return res.status(403).json({error:'Keine Berechtigung.'}); req.user=user; next(); };
 }
 function feePercent(){ const row=db.prepare("SELECT value FROM settings WHERE key='platform_fee_percent'").get(); const n=Number(row?.value ?? 10); return Number.isFinite(n)&&n>=0&&n<=30?n:10; }
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const PUSH_ENABLED = !!(webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+if (PUSH_ENABLED) webPush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:support@helferfix.de', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+const pushText = {
+ de: { message: 'Du hast eine neue Nachricht in HelferFix.', status: s => `Der Status deiner Anfrage wurde geändert: ${({new:'Wartet auf Admin-Freigabe',quoted:'Freigegeben – wartet auf Dienstleister',accepted:'Angenommen',cancelled:'Storniert',completed:'Abgeschlossen'}[s]||s)}.` },
+ ar: { message: 'وصلتك رسالة جديدة في HelferFix.', status: s => `تم تغيير حالة طلبك: ${({new:'بانتظار موافقة المسؤول',quoted:'تمت الموافقة – بانتظار مقدم الخدمة',accepted:'تم قبول الطلب',cancelled:'ملغى',completed:'مكتمل'}[s]||s)}.` },
+ en: { message: 'You have a new message in HelferFix.', status: s => `Your request status changed: ${({new:'Waiting for admin approval',quoted:'Approved – waiting for a provider',accepted:'Accepted',cancelled:'Cancelled',completed:'Completed'}[s]||s)}.` }
+};
+function notificationBody(kind, status, language='de') { const pack=pushText[language]||pushText.de; return kind==='message'?pack.message:pack.status(status); }
+async function sendPushToUser(userId, payload) {
+ if (!PUSH_ENABLED) return;
+ const rows=db.prepare('SELECT id,endpoint,subscription_json,language FROM push_subscriptions WHERE user_id=?').all(userId);
+ for (const row of rows) {
+  try { await webPush.sendNotification(JSON.parse(row.subscription_json), JSON.stringify({...payload, body:notificationBody(payload.kind,payload.status,row.language), title:'HelferFix', url:'/'})); }
+  catch (err) { if (err.statusCode===404 || err.statusCode===410) db.prepare('DELETE FROM push_subscriptions WHERE id=?').run(row.id); else console.warn('Web Push delivery failed:', err.message); }
+ }
+}
+function addUserNotification(userId, rideId, kind, status, messageId=null, actorId=null) {
+ if (!userId || Number(userId)===Number(actorId)) return;
+ db.prepare('INSERT INTO app_notifications(recipient_id,ride_request_id,kind,status,message_id) VALUES(?,?,?,?,?)').run(userId,rideId,kind,status||null,messageId);
+ sendPushToUser(userId,{kind,status,rideId}).catch(()=>{});
+}
+function notifyRideStatus(ride, status, actorId, extraUserId=null) {
+ if (!ride) return;
+ addUserNotification(ride.customer_id,ride.id,'status',status,null,actorId);
+ if (extraUserId && Number(extraUserId)!==Number(ride.customer_id)) addUserNotification(extraUserId,ride.id,'status',status,null,actorId);
+}
+
 function withMoney(ride){
  const { photos_json, ...rideData } = ride;
  let photosCount = 0;
@@ -130,6 +159,16 @@ function withMoney(ride){
   driverPayoutEuro:commission===null?null:((price-commission)/100).toFixed(2)};
 }
 app.get('/api/health',(req,res)=>res.json({ok:true,app:'HelferFix',mode:'MVP',bookingsAreConfirmed:false}));
+app.get('/api/push/public-key',(req,res)=>res.json({enabled:PUSH_ENABLED,publicKey:PUSH_ENABLED?VAPID_PUBLIC_KEY:null}));
+app.post('/api/push/subscribe',requireAuth,(req,res)=>{
+ const sub=req.body.subscription,language=['de','ar','en'].includes(req.body.language)?req.body.language:'de';
+ if(!PUSH_ENABLED)return res.status(503).json({error:'Browser-Push ist noch nicht konfiguriert.'});
+ if(!sub||typeof sub.endpoint!=='string'||!sub.keys||typeof sub.keys.p256dh!=='string'||typeof sub.keys.auth!=='string')return res.status(400).json({error:'Ungültiges Push-Abonnement.'});
+ db.prepare('INSERT INTO push_subscriptions(user_id,endpoint,subscription_json,language) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,subscription_json=excluded.subscription_json,language=excluded.language').run(req.user.id,sub.endpoint,JSON.stringify(sub),language);
+ res.json({ok:true});
+});
+app.delete('/api/push/subscribe',requireAuth,(req,res)=>{const endpoint=typeof req.body.endpoint==='string'?req.body.endpoint:'';if(endpoint)db.prepare('DELETE FROM push_subscriptions WHERE user_id=? AND endpoint=?').run(req.user.id,endpoint);res.json({ok:true});});
+
 app.get('/api/me',(req,res)=>res.json({user:currentUser(req)}));
 app.post('/api/auth/register',async(req,res)=>{
  const name=clean(req.body.name,100),email=clean(req.body.email,254).toLowerCase(),password=typeof req.body.password==='string'?req.body.password:'',role=req.body.role;
@@ -154,7 +193,6 @@ app.post('/api/rides',requireRole('customer'),(req,res)=>{
  const gardenHours=req.body.gardenHours===''||req.body.gardenHours==null?null:Number(req.body.gardenHours);
  const travelDate=clean(req.body.travelDate,10),travelTime=clean(req.body.travelTime,5);
  const passengers=Number(req.body.passengers),luggage=Number(req.body.luggage);
- const childCount=Number(req.body.childCount||0);
  const vehicleType=['PKW','Van','egal'].includes(req.body.vehicleType)?req.body.vehicleType:'PKW';
  const notes=clean(req.body.notes,1000),price=Number(req.body.priceEuro);
  const photos=req.body.photos==null?[]:req.body.photos;
@@ -180,26 +218,25 @@ app.post('/api/rides',requireRole('customer'),(req,res)=>{
  if(serviceType==='multi'&&serviceDescription.length<5)return res.status(400).json({error:'Bitte beschreibe die gewünschte Dienstleistung (mindestens 5 Zeichen).'});
  if(gardenHours!==null&&(!Number.isFinite(gardenHours)||gardenHours<0.5||gardenHours>100))return res.status(400).json({error:'Bitte prüfe die geschätzten Gartenstunden.'});
  if(serviceType==='airport'&&(!Number.isInteger(passengers)||passengers<1||passengers>8||!Number.isInteger(luggage)||luggage<0||luggage>20))return res.status(400).json({error:'Bitte prüfe Personen und Gepäck.'});
- if(serviceType==='airport'&&(!Number.isInteger(childCount)||childCount<0||childCount>8||childCount>passengers))return res.status(400).json({error:'Bitte prüfe die Anzahl der Kinder.'});
  if(!Number.isFinite(price)||price<1||price>10000||Math.round(price*100)!==price*100)return res.status(400).json({error:'Bitte gib einen gültigen Preis von mindestens 1 Euro ein.'});
  if(gardenSize!==null&&(!Number.isFinite(gardenSize)||gardenSize<0||gardenSize>100000))return res.status(400).json({error:'Bitte prüfe die Gartengröße.'});
  if(itemCount!==null&&(!Number.isInteger(itemCount)||itemCount<1||itemCount>1000))return res.status(400).json({error:'Bitte prüfe die Anzahl der Möbelstücke.'});
  if(serviceType==='garden'&&!gardenTask)return res.status(400).json({error:'Bitte wähle die Gartenarbeit aus.'});
  if(serviceType==='moving'&&(!movingTask||!pickupFloor||!destinationFloor||pickupElevator===null||destinationElevator===null||needHelpers===null||needVan===null))return res.status(400).json({error:'Bitte fülle die Angaben zum Umzug aus.'});
- if(serviceType==='airport'&&(!Number.isInteger(childSeatsNeeded)||childSeatsNeeded<0||childSeatsNeeded>8||childSeatsNeeded>childCount))return res.status(400).json({error:'Bitte prüfe die Anzahl der benötigten Kindersitze.'});
- if(serviceType==='airport'&&childCount>0&&!childAgesHeights)return res.status(400).json({error:'Bitte gib Alter und möglichst Körpergröße der Kinder an, die einen Kindersitz benötigen.'});
+ if(serviceType==='airport'&&(!Number.isInteger(childSeatsNeeded)||childSeatsNeeded<0||childSeatsNeeded>8))return res.status(400).json({error:'Bitte prüfe die Anzahl der benötigten Kindersitze.'});
+ if(serviceType==='airport'&&childSeatsNeeded>0&&!childAgesHeights)return res.status(400).json({error:'Bitte gib Alter und möglichst Körpergröße der Kinder an, die einen Kindersitz benötigen.'});
  if(travelDate&&!/^\d{4}-\d{2}-\d{2}$/.test(travelDate))return res.status(400).json({error:'Ungültiges Datum.'});
  const cents=Math.round(price*100),pct=feePercent(),commission=Math.round(cents*pct/100);
  const result=db.prepare(`INSERT INTO ride_requests (
  customer_id,service_type,pickup,destination,travel_date,travel_time,passengers,luggage,vehicle_type,notes,
  price_cents,commission_cents,driver_payout_cents,status,garden_task,garden_size_m2,moving_task,pickup_floor,destination_floor,
- pickup_elevator,destination_elevator,item_count,need_helpers,need_van,child_seats_needed,child_ages_heights,child_seat_provider,photos_json,service_description,garden_hours,child_count
- ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+ pickup_elevator,destination_elevator,item_count,need_helpers,need_van,child_seats_needed,child_ages_heights,child_seat_provider,photos_json,service_description,garden_hours
+ ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
  .run(req.user.id,serviceType,pickup,destination,travelDate,travelTime,
   serviceType==='airport'?passengers:0,serviceType==='airport'?luggage:0,serviceType==='airport'?vehicleType:'',notes||null,
   cents,commission,cents-commission,gardenTask,gardenSize,movingTask,pickupFloor||null,destinationFloor||null,
   pickupElevator,destinationElevator,itemCount,needHelpers,needVan,
-  serviceType==='airport'?childSeatsNeeded:0,serviceType==='airport'?(childAgesHeights||null):null,serviceType==='airport'?childSeatProvider:'none',photosJson,serviceType==='multi'?serviceDescription:null,serviceType==='garden'?gardenHours:null,serviceType==='airport'?childCount:0);
+  serviceType==='airport'?childSeatsNeeded:0,serviceType==='airport'?(childAgesHeights||null):null,serviceType==='airport'?childSeatProvider:'none',photosJson,serviceType==='multi'?serviceDescription:null,serviceType==='garden'?gardenHours:null);
  res.status(201).json({id:Number(result.lastInsertRowid),status:'new',priceEuro:(cents/100).toFixed(2),commissionEuro:(commission/100).toFixed(2),driverPayoutEuro:((cents-commission)/100).toFixed(2),message:'Anfrage gespeichert. Sie wird erst nach Freigabe durch den Admin für Fahrer sichtbar; noch keine Fahrt bestätigt.'});
 });
 app.get('/api/rides/:id/photos',requireRole('customer','driver','admin'),(req,res)=>{
@@ -237,15 +274,18 @@ app.post('/api/rides/:id/accept',requireRole('driver'),(req,res)=>{
   return true;
  });
  if(!tx())return res.status(409).json({error:'Diese Anfrage wurde bereits angenommen oder ist nicht mehr verfügbar.'});
+ const acceptedRide=db.prepare('SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE id=?').get(id);notifyRideStatus(acceptedRide,'accepted',req.user.id);
  res.json({message:'Du hast die Anfrage übernommen. Bitte kläre alle Einzelheiten mit dem Kunden.'});
 });
 app.post('/api/rides/:id/cancel',requireRole('driver'),(req,res)=>{
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
+ const before=db.prepare('SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE id=?').get(id);
  const tx=db.transaction(()=>{
   const result=db.prepare("UPDATE ride_requests SET status='quoted',assigned_driver_id=NULL,accepted_at=NULL WHERE id=? AND status='accepted' AND assigned_driver_id=?").run(id,req.user.id);
   return result.changes;
  });
  if(!tx())return res.status(409).json({error:'Diese Anfrage ist dir nicht zugeordnet oder wurde bereits geändert.'});
+ notifyRideStatus(before,'quoted',req.user.id);
  res.json({message:'Anfrage wieder für andere Fahrer freigegeben.'});
 });
 app.get('/api/rides/assigned',requireRole('driver'),(req,res)=>{
@@ -274,10 +314,7 @@ app.get('/api/rides/:id/messages',requireRole('customer','driver'),(req,res)=>{
  const id=Number(req.params.id); if(!Number.isInteger(id)||id<1)return res.status(400).json({error:'Ungültige Anfrage.'});
  const ride=getChatRide(id); if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
  if(!canUseChat(ride,req.user))return res.status(403).json({error:'Der Chat ist nur für den Kunden und den zugeordneten Fahrer eines angenommenen Auftrags verfügbar.'});
- const recipientCondition = 'sender_id<>?';
- db.prepare(`UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP), read_at=COALESCE(read_at,CURRENT_TIMESTAMP) WHERE ride_request_id=? AND ${recipientCondition}`).run(id,req.user.id);
- db.prepare('UPDATE chat_notifications SET read_at=COALESCE(read_at,CURRENT_TIMESTAMP) WHERE recipient_id=? AND ride_request_id=? AND read_at IS NULL').run(req.user.id,id);
- const messages=db.prepare('SELECT m.id,m.sender_id,m.message,m.created_at,m.delivered_at,m.read_at,u.name AS sender_name FROM chat_messages m JOIN users u ON u.id=m.sender_id WHERE m.ride_request_id=? ORDER BY m.id DESC LIMIT 200').all(id).reverse();
+ const messages=db.prepare('SELECT m.id,m.sender_id,m.message,m.created_at,u.name AS sender_name FROM chat_messages m JOIN users u ON u.id=m.sender_id WHERE m.ride_request_id=? ORDER BY m.id DESC LIMIT 200').all(id).reverse();
  res.json({messages});
 });
 app.post('/api/rides/:id/messages',requireRole('customer','driver'),(req,res)=>{
@@ -288,20 +325,20 @@ app.post('/api/rides/:id/messages',requireRole('customer','driver'),(req,res)=>{
  if(!message||message.length>2000)return res.status(400).json({error:'Bitte gib eine Nachricht mit 1 bis 2000 Zeichen ein.'});
  const result=db.prepare('INSERT INTO chat_messages(ride_request_id,sender_id,message) VALUES(?,?,?)').run(id,req.user.id,message);
  const recipientId=req.user.role==='customer'?ride.assigned_driver_id:ride.customer_id;
- db.prepare('INSERT INTO chat_notifications(recipient_id,ride_request_id,message_id) VALUES(?,?,?)').run(recipientId,id,Number(result.lastInsertRowid));
- const saved=db.prepare('SELECT m.id,m.sender_id,m.message,m.created_at,m.delivered_at,m.read_at,u.name AS sender_name FROM chat_messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?').get(Number(result.lastInsertRowid));
+ addUserNotification(recipientId,id,'message',null,Number(result.lastInsertRowid),req.user.id);
+ const saved=db.prepare('SELECT m.id,m.sender_id,m.message,m.created_at,u.name AS sender_name FROM chat_messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?').get(Number(result.lastInsertRowid));
  res.status(201).json({message:saved});
 });
 
-// In-app unread chat notifications for the other participant.
-app.get('/api/notifications/unread',requireRole('customer','driver'),(req,res)=>{
- db.prepare(`UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP) WHERE id IN (SELECT message_id FROM chat_notifications WHERE recipient_id=? AND read_at IS NULL)`).run(req.user.id);
- const rows=db.prepare(`SELECT n.id,n.ride_request_id,n.message_id,n.created_at,m.message,u.name AS sender_name FROM chat_notifications n JOIN chat_messages m ON m.id=n.message_id JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL ORDER BY n.id DESC LIMIT 30`).all(req.user.id);
- res.json({notifications:rows});
+// Unified unread notifications: chat messages and request-status changes.
+app.get('/api/notifications/unread',requireRole('customer','driver','admin'),(req,res)=>{
+ const current=db.prepare(`SELECT 'n-'||n.id AS id,n.id AS internal_id,n.ride_request_id,n.kind,n.status,n.message_id,n.created_at,m.message,u.name AS sender_name FROM app_notifications n LEFT JOIN chat_messages m ON m.id=n.message_id LEFT JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL`).all(req.user.id);
+ const legacy=db.prepare(`SELECT 'c-'||n.id AS id,n.id AS internal_id,n.ride_request_id,'message' AS kind,NULL AS status,n.message_id,n.created_at,m.message,u.name AS sender_name FROM chat_notifications n JOIN chat_messages m ON m.id=n.message_id JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL AND NOT EXISTS(SELECT 1 FROM app_notifications a WHERE a.message_id=n.message_id AND a.recipient_id=n.recipient_id)`).all(req.user.id);
+ res.json({notifications:[...current,...legacy].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,50)});
 });
-app.post('/api/notifications/read',requireRole('customer','driver'),(req,res)=>{
- const ids=Array.isArray(req.body.ids)?req.body.ids.map(Number).filter(n=>Number.isInteger(n)&&n>0).slice(0,100):[];
- if(ids.length){const marks=ids.map(()=>'?').join(',');db.prepare(`UPDATE chat_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id IN (${marks})`).run(req.user.id,...ids);}
+app.post('/api/notifications/read',requireRole('customer','driver','admin'),(req,res)=>{
+ const ids=Array.isArray(req.body.ids)?req.body.ids.slice(0,100):[];
+ for(const raw of ids){const value=String(raw);const match=value.match(/^([nc])-(\d+)$/);if(!match)continue;const id=Number(match[2]);if(match[1]==='n')db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else db.prepare('UPDATE chat_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);}
  res.json({ok:true});
 });
 
@@ -317,8 +354,9 @@ app.get('/api/admin/users',requireRole('admin'),(req,res)=>res.json({users:db.pr
 app.patch('/api/admin/users/:id',requireRole('admin'),(req,res)=>{
  const id=Number(req.params.id),active=req.body.active;if(!Number.isInteger(id)||typeof active!=='boolean')return res.status(400).json({error:'Ungültige Daten.'});
  const target=db.prepare('SELECT id,role FROM users WHERE id=?').get(id);if(!target)return res.status(404).json({error:'Nutzer nicht gefunden.'});if(target.role==='admin')return res.status(400).json({error:'Admin-Konten können hier nicht deaktiviert werden.'});
+ const affectedRides=!active&&target.role==='driver'?db.prepare("SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE status='accepted' AND assigned_driver_id=?").all(id):[];
  db.prepare('UPDATE users SET active=? WHERE id=?').run(active?1:0,id);
- if(!active&&target.role==='driver')db.prepare("UPDATE ride_requests SET status='quoted',assigned_driver_id=NULL,accepted_at=NULL WHERE status='accepted' AND assigned_driver_id=?").run(id);
+ if(affectedRides.length){db.prepare("UPDATE ride_requests SET status='quoted',assigned_driver_id=NULL,accepted_at=NULL WHERE status='accepted' AND assigned_driver_id=?").run(id);for(const ride of affectedRides)notifyRideStatus(ride,'quoted',req.user.id,id);}
  res.json({message:active?'Nutzer aktiviert.':'Nutzer deaktiviert.'});
 });
 app.get('/api/admin/rides',requireRole('admin'),(req,res)=>{
@@ -334,6 +372,7 @@ app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
  if(status==='quoted'&&ride.status==='accepted')return res.status(409).json({error:'Bitte lasse den Fahrer die Anfrage zuerst freigeben.'});
  const approvedAt=status==='quoted'?(ride.admin_approved_at||new Date().toISOString()):ride.admin_approved_at;
  db.prepare('UPDATE ride_requests SET status=?,admin_approved_at=?,assigned_driver_id=CASE WHEN ? IN (\'new\',\'cancelled\',\'completed\') THEN NULL ELSE assigned_driver_id END,accepted_at=CASE WHEN ? IN (\'new\',\'cancelled\',\'completed\') THEN NULL ELSE accepted_at END WHERE id=?').run(status,approvedAt,status,status,id);
+ if(ride.status!==status)notifyRideStatus(ride,status,req.user.id,ride.assigned_driver_id);
  res.json({message:status==='quoted'?'Anfrage freigegeben und für Fahrer sichtbar.':status==='cancelled'?'Anfrage storniert.':status==='completed'?'Anfrage abgeschlossen.':'Status aktualisiert.'});
 });
 app.get('/api/admin/settings',requireRole('admin'),(req,res)=>{
