@@ -123,10 +123,32 @@ function requireRole(...roles) {
  return (req,res,next)=>{ const user=currentUser(req); if(!user||!user.active)return res.status(401).json({error:'Bitte melde dich an.'}); if(!roles.includes(user.role))return res.status(403).json({error:'Keine Berechtigung.'}); req.user=user; next(); };
 }
 function feePercent(){ const row=db.prepare("SELECT value FROM settings WHERE key='platform_fee_percent'").get(); const n=Number(row?.value ?? 10); return Number.isFinite(n)&&n>=0&&n<=30?n:10; }
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
-const PUSH_ENABLED = !!(webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
-if (PUSH_ENABLED) webPush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:support@helferfix.de', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+const VAPID_PUBLIC_KEY = String(process.env.VAPID_PUBLIC_KEY || '').trim();
+const VAPID_PRIVATE_KEY = String(process.env.VAPID_PRIVATE_KEY || '').trim();
+const VAPID_SUBJECT = String(process.env.VAPID_SUBJECT || 'mailto:support@helferfix.de').trim();
+function decodeVapidKey(value) {
+ if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+ try {
+  const normalized=value.replace(/-/g,'+').replace(/_/g,'/');
+  return Buffer.from(normalized + '='.repeat((4-normalized.length%4)%4),'base64');
+ } catch { return null; }
+}
+let PUSH_ENABLED = false;
+if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+ const publicBytes=decodeVapidKey(VAPID_PUBLIC_KEY);
+ const privateBytes=decodeVapidKey(VAPID_PRIVATE_KEY);
+ if (!publicBytes || publicBytes.length!==65 || publicBytes[0]!==4 || !privateBytes || privateBytes.length!==32) {
+  console.warn('Web Push disabled: VAPID keys have an invalid format or length. Check Render environment variables.');
+ } else {
+  try {
+   if (!/^(mailto:[^\\s]+|https:\\/\\/[^\\s]+)$/.test(VAPID_SUBJECT)) throw new Error('VAPID_SUBJECT must be a mailto: or https:// URL.');
+   webPush.setVapidDetails(VAPID_SUBJECT,VAPID_PUBLIC_KEY,VAPID_PRIVATE_KEY);
+   PUSH_ENABLED = true;
+  } catch (error) {
+   console.warn('Web Push disabled: VAPID configuration is invalid:', error.message);
+  }
+ }
+}
 const pushText = {
  de: { message: 'Du hast eine neue Nachricht in HelferFix.', status: s => `Der Status deiner Anfrage wurde geändert: ${({new:'Wartet auf Admin-Freigabe',quoted:'Freigegeben – wartet auf Dienstleister',accepted:'Angenommen',cancelled:'Storniert',completed:'Abgeschlossen'}[s]||s)}.` },
  ar: { message: 'وصلتك رسالة جديدة في HelferFix.', status: s => `تم تغيير حالة طلبك: ${({new:'بانتظار موافقة المسؤول',quoted:'تمت الموافقة – بانتظار مقدم الخدمة',accepted:'تم قبول الطلب',cancelled:'ملغى',completed:'مكتمل'}[s]||s)}.` },
