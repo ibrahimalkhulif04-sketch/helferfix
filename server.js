@@ -141,7 +141,7 @@ if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   console.warn('Web Push disabled: VAPID keys have an invalid format or length. Check Render environment variables.');
  } else {
   try {
-   if (!/^(mailto:[^\\s]+|https:\\/\\/[^\\s]+)$/.test(VAPID_SUBJECT)) throw new Error('VAPID_SUBJECT must be a mailto: or https:// URL.');
+   if (!/^(mailto:\S+|https:\/\/\S+)$/.test(VAPID_SUBJECT)) throw new Error('VAPID_SUBJECT must be a mailto: or https:// URL.');
    webPush.setVapidDetails(VAPID_SUBJECT,VAPID_PUBLIC_KEY,VAPID_PRIVATE_KEY);
    PUSH_ENABLED = true;
   } catch (error) {
