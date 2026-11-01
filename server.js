@@ -156,11 +156,27 @@ const pushText = {
 };
 function notificationBody(kind, status, language='de') { const pack=pushText[language]||pushText.de; return kind==='message'?pack.message:pack.status(status); }
 async function sendPushToUser(userId, payload) {
- if (!PUSH_ENABLED) return;
+ if (!PUSH_ENABLED) {
+  console.warn(`[push] skipped: Web Push is disabled (userId=${userId})`);
+  return;
+ }
  const rows=db.prepare('SELECT id,endpoint,subscription_json,language FROM push_subscriptions WHERE user_id=?').all(userId);
+ if (!rows.length) {
+  console.warn(`[push] no saved subscriptions for userId=${userId}`);
+  return;
+ }
+ console.info(`[push] sending kind=${payload.kind} userId=${userId} subscriptions=${rows.length}`);
  for (const row of rows) {
-  try { await webPush.sendNotification(JSON.parse(row.subscription_json), JSON.stringify({...payload, body:notificationBody(payload.kind,payload.status,row.language), title:'HelferFix', url:'/'})); }
-  catch (err) { if (err.statusCode===404 || err.statusCode===410) db.prepare('DELETE FROM push_subscriptions WHERE id=?').run(row.id); else console.warn('Web Push delivery failed:', err.message); }
+  try {
+   await webPush.sendNotification(JSON.parse(row.subscription_json), JSON.stringify({...payload, body:notificationBody(payload.kind,payload.status,row.language), title:'HelferFix', url:'/'}));
+   console.info(`[push] delivered userId=${userId} subscriptionId=${row.id}`);
+  } catch (err) {
+   console.error(`[push] delivery failed userId=${userId} subscriptionId=${row.id} statusCode=${err.statusCode||'unknown'} message=${err.message}`);
+   if (err.statusCode===404 || err.statusCode===410) {
+    db.prepare('DELETE FROM push_subscriptions WHERE id=?').run(row.id);
+    console.warn(`[push] removed expired subscriptionId=${row.id}`);
+   }
+  }
  }
 }
 function addUserNotification(userId, rideId, kind, status, messageId=null, actorId=null) {
@@ -189,9 +205,18 @@ app.get('/api/health',(req,res)=>res.json({ok:true,app:'HelferFix',mode:'MVP',bo
 app.get('/api/push/public-key',(req,res)=>res.json({enabled:PUSH_ENABLED,publicKey:PUSH_ENABLED?VAPID_PUBLIC_KEY:null}));
 app.post('/api/push/subscribe',requireAuth,(req,res)=>{
  const sub=req.body.subscription,language=['de','ar','en'].includes(req.body.language)?req.body.language:'de';
- if(!PUSH_ENABLED)return res.status(503).json({error:'Browser-Push ist noch nicht konfiguriert.'});
- if(!sub||typeof sub.endpoint!=='string'||!sub.keys||typeof sub.keys.p256dh!=='string'||typeof sub.keys.auth!=='string')return res.status(400).json({error:'Ungültiges Push-Abonnement.'});
+ console.info(`[push] subscribe request userId=${req.user.id}`);
+ if(!PUSH_ENABLED) {
+  console.warn(`[push] subscribe rejected: Web Push disabled userId=${req.user.id}`);
+  return res.status(503).json({error:'Browser-Push ist noch nicht konfiguriert.'});
+ }
+ if(!sub||typeof sub.endpoint!=='string'||!sub.keys||typeof sub.keys.p256dh!=='string'||typeof sub.keys.auth!=='string') {
+  console.warn(`[push] subscribe rejected: invalid payload userId=${req.user.id}`);
+  return res.status(400).json({error:'Ungültiges Push-Abonnement.'});
+ }
  db.prepare('INSERT INTO push_subscriptions(user_id,endpoint,subscription_json,language) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,subscription_json=excluded.subscription_json,language=excluded.language').run(req.user.id,sub.endpoint,JSON.stringify(sub),language);
+ const total=db.prepare('SELECT COUNT(*) AS count FROM push_subscriptions WHERE user_id=?').get(req.user.id).count;
+ console.info(`[push] subscription saved userId=${req.user.id} totalSubscriptions=${total}`);
  res.json({ok:true});
 });
 app.delete('/api/push/subscribe',requireAuth,(req,res)=>{const endpoint=typeof req.body.endpoint==='string'?req.body.endpoint:'';if(endpoint)db.prepare('DELETE FROM push_subscriptions WHERE user_id=? AND endpoint=?').run(req.user.id,endpoint);res.json({ok:true});});
