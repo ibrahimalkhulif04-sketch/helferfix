@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS quotes (
  message TEXT, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','declined')),
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(ride_request_id, driver_id)
 );
+CREATE TABLE IF NOT EXISTS ride_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ride_request_id INTEGER NOT NULL, actor_user_id INTEGER, actor_role TEXT NOT NULL, action TEXT NOT NULL, old_status TEXT, new_status TEXT, details TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS chat_messages (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -303,6 +304,58 @@ app.get('/api/rides/:id/photos',requireRole('customer','driver','admin'),(req,re
  let photos=[];try{photos=ride.photos_json?JSON.parse(ride.photos_json):[];}catch{photos=[];}
  res.json({photos:photos.map(photo=>({name:clean(photo.name,120),type:photo.type,data:photo.data}))});
 });
+
+app.get('/api/rides/:id/edit',requireRole('customer'),(req,res)=>{
+ const id=Number(req.params.id),ride=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
+ if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
+ if(!['new','quoted'].includes(ride.status)||ride.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Änderung nur über den Support möglich.'});
+ res.json({ride:withMoney(ride)});
+});
+app.patch('/api/rides/:id',requireRole('customer'),(req,res)=>{
+ const id=Number(req.params.id),b=req.body||{};
+ const old=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
+ if(!old)return res.status(404).json({error:'Anfrage nicht gefunden.'});
+ if(!['new','quoted'].includes(old.status)||old.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Änderung nur über den Support möglich.'});
+ const type=['airport','garden','moving','multi'].includes(b.serviceType)?b.serviceType:null;
+ const pickup=clean(b.pickup,180),destination=clean(b.destination,180),date=clean(b.travelDate,10),time=clean(b.travelTime,5),price=Number(b.priceEuro);
+ const now=new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date()).replace(' ','T');
+ if(!type||(!pickup&&type!=='multi')||((type==='airport'||type==='moving')&&destination.length<2)||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)||`${date}T${time}`<now||!Number.isFinite(price)||price<1||price>10000||Math.round(price*100)!==price*100)return res.status(400).json({error:'Bitte prüfe Dienstleistung, Start, Ziel, Datum, Uhrzeit und Preis.'});
+ const desc=clean(b.serviceDescription,2000),gardenTask=['lawn','hedge','cleaning','other'].includes(b.gardenTask)?b.gardenTask:null;
+ const gardenSize=b.gardenSizeM2===''||b.gardenSizeM2==null?null:Number(b.gardenSizeM2),gardenHours=b.gardenHours===''||b.gardenHours==null?null:Number(b.gardenHours);
+ const movingTask=['move','assembly','both'].includes(b.movingTask)?b.movingTask:null;
+ const pickupFloor=clean(b.pickupFloor,30),destinationFloor=clean(b.destinationFloor,30);
+ const bool=v=>v===true?1:v===false?0:null;
+ const pickupElevator=bool(b.pickupElevator),destinationElevator=bool(b.destinationElevator),needHelpers=bool(b.needHelpers),needVan=bool(b.needVan);
+ const itemCount=b.itemCount===''||b.itemCount==null?null:Number(b.itemCount);
+ const passengers=type==='airport'?Number(b.passengers):0,luggage=type==='airport'?Number(b.luggage):0;
+ const childCount=type==='airport'?Number(b.childCount||0):0,childSeats=type==='airport'?Number(b.childSeatsNeeded||0):0;
+ const childAges=clean(b.childAgesHeights,200),seatProvider=['customer','driver','none'].includes(b.childSeatProvider)?b.childSeatProvider:'none';
+ if(type==='garden'&&(!gardenTask||(gardenSize!==null&&(!Number.isFinite(gardenSize)||gardenSize<0||gardenSize>100000))||(gardenHours!==null&&(!Number.isFinite(gardenHours)||gardenHours<.5||gardenHours>100))))return res.status(400).json({error:'Bitte prüfe die Gartenangaben.'});
+ if(type==='moving'&&(!movingTask||!pickupFloor||!destinationFloor||pickupElevator===null||destinationElevator===null||needHelpers===null||needVan===null||(itemCount!==null&&(!Number.isInteger(itemCount)||itemCount<1||itemCount>1000))))return res.status(400).json({error:'Bitte prüfe die Umzugsangaben.'});
+ if(type==='airport'&&(!Number.isInteger(passengers)||passengers<1||passengers>8||!Number.isInteger(luggage)||luggage<0||luggage>20||!Number.isInteger(childCount)||childCount<0||childCount>8||!Number.isInteger(childSeats)||childSeats<0||childSeats>8||(childSeats>0&&!childAges)))return res.status(400).json({error:'Bitte prüfe Personen, Gepäck und Kindersitze.'});
+ if(type==='multi'&&desc.length<5)return res.status(400).json({error:'Bitte beschreibe die Dienstleistung genauer.'});
+ const photos=Array.isArray(b.photos)?b.photos:null;let photosJson=old.photos_json;
+ if(photos&&photos.length){if(photos.length>3||photos.some(p=>!p||typeof p.name!=='string'||p.name.length>120||!['image/jpeg','image/png','image/webp'].includes(p.type)||typeof p.data!=='string'||p.data.length>1400000||!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(p.data)))return res.status(400).json({error:'Bitte lade höchstens 3 gültige Bilder hoch.'});photosJson=JSON.stringify(photos);}
+ const cents=Math.round(price*100),commission=Math.round(cents*feePercent()/100);
+ const changed=db.prepare("UPDATE ride_requests SET service_type=?,pickup=?,destination=?,travel_date=?,travel_time=?,passengers=?,luggage=?,vehicle_type=?,notes=?,price_cents=?,commission_cents=?,driver_payout_cents=?,garden_task=?,garden_size_m2=?,garden_hours=?,moving_task=?,pickup_floor=?,destination_floor=?,pickup_elevator=?,destination_elevator=?,item_count=?,need_helpers=?,need_van=?,child_count=?,child_seats_needed=?,child_ages_heights=?,child_seat_provider=?,service_description=?,photos_json=?,status='new',admin_approved_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL")
+ .run(type,pickup||'—',(type==='garden'||type==='multi')?(pickup||'—'):destination,date,time,passengers,luggage,type==='airport'?(b.vehicleType||'PKW'):'',clean(b.notes,1000)||null,cents,commission,cents-commission,type==='garden'?gardenTask:null,type==='garden'?gardenSize:null,type==='garden'?gardenHours:null,type==='moving'?movingTask:null,type==='moving'?pickupFloor:null,type==='moving'?destinationFloor:null,type==='moving'?pickupElevator:null,type==='moving'?destinationElevator:null,type==='moving'?itemCount:null,type==='moving'?needHelpers:null,type==='moving'?needVan:null,childCount,childSeats,childAges||null,seatProvider,type==='multi'?desc:null,photosJson,id,req.user.id);
+ if(!changed.changes)return res.status(409).json({error:'Die Anfrage wurde inzwischen angenommen oder geändert.'});
+ db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,'customer_edit',?,?,?)").run(id,req.user.id,'customer',old.status,'new',JSON.stringify({service_type:type,price_cents:cents}));
+ const updated=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);
+ if(old.status==='quoted')notifyRideStatus(updated,'new',req.user.id);
+ res.json({message:'Anfrage geändert. Sie wartet erneut auf die Admin-Freigabe.'});
+});
+app.post('/api/rides/:id/customer-cancel',requireRole('customer'),(req,res)=>{
+ const id=Number(req.params.id),ride=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
+ if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
+ if(!['new','quoted'].includes(ride.status)||ride.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Stornierung nur über den Support möglich.'});
+ const result=db.prepare("UPDATE ride_requests SET status='cancelled',assigned_driver_id=NULL,accepted_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL").run(id,req.user.id);
+ if(!result.changes)return res.status(409).json({error:'Die Anfrage wurde inzwischen angenommen oder geändert.'});
+ db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status) VALUES(?,?,?,'customer_cancel',?,'cancelled')").run(id,req.user.id,'customer',ride.status);
+ notifyRideStatus(ride,'cancelled',req.user.id);
+ res.json({message:'Anfrage storniert.'});
+});
+
 app.get('/api/rides/mine',requireRole('customer'),(req,res)=>{
  const rides=db.prepare('SELECT r.*,u.name AS driver_name FROM ride_requests r LEFT JOIN users u ON u.id=r.assigned_driver_id WHERE r.customer_id=? ORDER BY r.id DESC').all(req.user.id);
  res.json({rides:rides.map(withMoney)});
@@ -437,7 +490,7 @@ app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
  if(status==='quoted'&&ride.status==='accepted')return res.status(409).json({error:'Bitte lasse den Fahrer die Anfrage zuerst freigeben.'});
  const approvedAt=status==='quoted'?(ride.admin_approved_at||new Date().toISOString()):ride.admin_approved_at;
  db.prepare('UPDATE ride_requests SET status=?,admin_approved_at=?,assigned_driver_id=CASE WHEN ? IN (\'new\',\'cancelled\',\'completed\') THEN NULL ELSE assigned_driver_id END,accepted_at=CASE WHEN ? IN (\'new\',\'cancelled\',\'completed\') THEN NULL ELSE accepted_at END WHERE id=?').run(status,approvedAt,status,status,id);
- if(ride.status!==status)notifyRideStatus(ride,status,req.user.id,ride.assigned_driver_id);
+ if(ride.status!==status&&status==='cancelled')db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status) VALUES(?,?,?,'admin_cancel',?,'cancelled')").run(id,req.user.id,'admin',ride.status);if(ride.status!==status)notifyRideStatus(ride,status,req.user.id,ride.assigned_driver_id);
  res.json({message:status==='quoted'?'Anfrage freigegeben und für Fahrer sichtbar.':status==='cancelled'?'Anfrage storniert.':status==='completed'?'Anfrage abgeschlossen.':'Status aktualisiert.'});
 });
 app.get('/api/support/contact',(req,res)=>{const row=db.prepare('SELECT value FROM settings WHERE key=?').get('support_email');res.json({email:row?.value||''});});
