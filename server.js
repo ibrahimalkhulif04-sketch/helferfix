@@ -429,6 +429,7 @@ app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
  if(ride.status!==status)notifyRideStatus(ride,status,req.user.id,ride.assigned_driver_id);
  res.json({message:status==='quoted'?'Anfrage freigegeben und für Fahrer sichtbar.':status==='cancelled'?'Anfrage storniert.':status==='completed'?'Anfrage abgeschlossen.':'Status aktualisiert.'});
 });
+app.get('/api/support/contact',(req,res)=>{const row=db.prepare('SELECT value FROM settings WHERE key=?').get('support_email');res.json({email:row?.value||''});});
 app.get('/api/admin/settings',requireRole('admin'),(req,res)=>{
  const rows=db.prepare('SELECT key,value,updated_at FROM settings ORDER BY key').all(),values=Object.fromEntries(rows.map(r=>[r.key,r.value]));
  res.json({settings:{site_name:values.site_name||'HelferFix',platform_fee_percent:values.platform_fee_percent||'10',support_email:values.support_email||''}});
