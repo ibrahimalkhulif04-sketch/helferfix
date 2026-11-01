@@ -228,7 +228,7 @@ app.delete('/api/push/subscribe',requireAuth,(req,res)=>{const endpoint=typeof r
 app.get('/api/me',(req,res)=>res.json({user:currentUser(req)}));
 app.post('/api/auth/register',async(req,res)=>{
  const name=clean(req.body.name,100),email=clean(req.body.email,254).toLowerCase(),password=typeof req.body.password==='string'?req.body.password:'',role=req.body.role;
- if(name.length<2||!emailOk(email)||password.length<8||password.length>200||password!==String(req.body.confirmPassword||'')||!['customer','driver'].includes(role))return res.status(400).json({error:'Bitte Name, gültige E-Mail, Passwort (mind. 8 Zeichen) und passende Bestätigung und Rolle korrekt angeben.'});
+ if(name.length<4||!emailOk(email)||password.length<8||password.length>200||password!==String(req.body.confirmPassword||'')||!['customer','driver'].includes(role))return res.status(400).json({error:'Bitte Name, gültige E-Mail, Passwort (mind. 8 Zeichen) und passende Bestätigung und Rolle korrekt angeben.'});
  try{const hash=await bcrypt.hash(password,12);const result=db.prepare('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,?)').run(name,email,hash,role);
   req.session.regenerate(err=>{if(err)return res.status(500).json({error:'Sitzung konnte nicht erstellt werden.'});req.session.userId=Number(result.lastInsertRowid);res.status(201).json({user:currentUser(req),message:'Konto erstellt. Angaben des Dienstleisters sind noch nicht geprüft.'});});
  }catch(e){if(String(e.code).includes('SQLITE_CONSTRAINT_UNIQUE'))return res.status(409).json({error:'Diese E-Mail-Adresse ist bereits registriert.'});console.error(e);res.status(500).json({error:'Registrierung fehlgeschlagen.'});}
