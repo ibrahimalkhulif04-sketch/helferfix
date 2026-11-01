@@ -70,7 +70,7 @@ function localizeApiError(message){const map={
 function flash(msg,type='success'){ $('flash').innerHTML=msg?`<div class="${type}">${esc(msg)}</div>`:'';}
 function boxMsg(id,msg,type='error'){ $(id).innerHTML=msg?`<div class="${type}">${esc(msg)}</div>`:''; }
 async function api(url,opts={}){const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json','X-App-Language':lang,...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw new Error(localizeApiError(d.error)||t('unknown'));return d;}
-function updateSupportLink(){const link=$('supportLink');if(!link||!supportEmail)return;link.href=`mailto:${encodeURIComponent(supportEmail)}?subject=${encodeURIComponent(t('supportSubject'))}&body=${encodeURIComponent(t('supportBody'))}`;link.title=t('contactSupport');link.setAttribute('aria-label',t('contactSupport'));}
+function updateSupportLink(){const link=$('supportLink');if(!link||!supportEmail)return;link.href=`mailto:${supportEmail}?subject=${encodeURIComponent(t('supportSubject'))}&body=${encodeURIComponent(t('supportBody'))}`;link.title=t('contactSupport');link.setAttribute('aria-label',t('contactSupport'));}
 function vehicleTypeText(value){if(value==='PKW')return t('vehiclePkw');if(value==='Van')return 'Van';if(value==='egal')return t('anyVehicle');return value||'—';}
 let supportEmail='';
 async function loadSupportContact(){try{const response=await fetch('/api/support/contact',{credentials:'same-origin'});if(!response.ok)return;const data=await response.json();supportEmail=String(data.email||'').trim();$('supportLink').classList.toggle('hidden',!supportEmail);updateSupportLink();}catch(error){console.warn('Support contact could not be loaded:',error);}}
