@@ -122,7 +122,7 @@ function requireAuth(req,res,next) {
 function requireRole(...roles) {
  return (req,res,next)=>{ const user=currentUser(req); if(!user||!user.active)return res.status(401).json({error:'Bitte melde dich an.'}); if(!roles.includes(user.role))return res.status(403).json({error:'Keine Berechtigung.'}); req.user=user; next(); };
 }
-function feePercent(){ const row=db.prepare("SELECT value FROM settings WHERE key='platform_fee_percent'").get(); const n=Number(row?.value ?? 10); return Number.isFinite(n)&&n>=0&&n<=30?n:10; }
+function feePercent(){ const row=db.prepare("SELECT value FROM settings WHERE key='platform_fee_percent'").get(); const n=Number(row?.value ?? 5); return Number.isFinite(n)&&n>=0&&n<=30?n:5; }
 const VAPID_PUBLIC_KEY = String(process.env.VAPID_PUBLIC_KEY || '').trim();
 const VAPID_PRIVATE_KEY = String(process.env.VAPID_PRIVATE_KEY || '').trim();
 const VAPID_SUBJECT = String(process.env.VAPID_SUBJECT || 'mailto:support@helferfix.de').trim();
@@ -195,13 +195,14 @@ function withMoney(ride){
  let photosCount = 0;
  try { photosCount = photos_json ? JSON.parse(photos_json).length : 0; } catch {}
  const price=Number.isInteger(ride.price_cents)?ride.price_cents:null;
- const pct=feePercent();
- const commission=price===null?null:Math.round(price*pct/100);
+ const commission=price===null?null:(Number.isInteger(ride.commission_cents)?ride.commission_cents:Math.round(price*feePercent()/100));
+ const pct=price===null?feePercent():(price>0?commission/price*100:feePercent());
  return {...rideData, photosCount, priceEuro:price===null?null:(price/100).toFixed(2), commissionPercent:pct,
   commissionEuro:commission===null?null:(commission/100).toFixed(2),
   driverPayoutEuro:commission===null?null:((price-commission)/100).toFixed(2)};
 }
 app.get('/api/health',(req,res)=>res.json({ok:true,app:'HelferFix',mode:'MVP',bookingsAreConfirmed:false}));
+app.get('/api/fees',(req,res)=>res.json({commissionPercent:feePercent()}));
 app.get('/api/push/public-key',(req,res)=>res.json({enabled:PUSH_ENABLED,publicKey:PUSH_ENABLED?VAPID_PUBLIC_KEY:null}));
 app.post('/api/push/subscribe',requireAuth,(req,res)=>{
  const sub=req.body.subscription,language=['de','ar','en'].includes(req.body.language)?req.body.language:'de';
@@ -321,13 +322,20 @@ app.get('/api/rides/open',requireRole('driver'),(req,res)=>{
 app.post('/api/rides/:id/accept',requireRole('driver'),(req,res)=>{
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
  const tx=db.transaction(()=>{
+  const ride=db.prepare("SELECT price_cents,commission_cents,driver_payout_cents FROM ride_requests WHERE id=? AND status='quoted' AND assigned_driver_id IS NULL").get(id);
+  if(!ride)return false;
+  const expectedCommission=Number(req.body?.commissionCents),expectedPayout=Number(req.body?.payoutCents);
+  if(!Number.isInteger(expectedCommission)||!Number.isInteger(expectedPayout)||expectedCommission!==ride.commission_cents||expectedPayout!==ride.driver_payout_cents)return null;
   const result=db.prepare("UPDATE ride_requests SET status='accepted',assigned_driver_id=?,accepted_at=CURRENT_TIMESTAMP WHERE id=? AND status='quoted' AND assigned_driver_id IS NULL").run(req.user.id,id);
   if(!result.changes)return false;
   return true;
  });
- if(!tx())return res.status(409).json({error:'Diese Anfrage wurde bereits angenommen oder ist nicht mehr verfügbar.'});
+ const accepted=tx();
+ if(accepted===null)return res.status(409).json({error:'Die angezeigte Auszahlung stimmt nicht mehr. Bitte aktualisiere die Anfrage und prüfe den Betrag erneut.'});
+ if(!accepted)return res.status(409).json({error:'Diese Anfrage wurde bereits angenommen oder ist nicht mehr verfügbar.'});
  const acceptedRide=db.prepare('SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE id=?').get(id);notifyRideStatus(acceptedRide,'accepted',req.user.id);
- res.json({message:'Du hast die Anfrage übernommen. Bitte kläre alle Einzelheiten mit dem Kunden.'});
+ const amounts=db.prepare('SELECT price_cents,commission_cents,driver_payout_cents FROM ride_requests WHERE id=?').get(id);
+ res.json({message:'Du hast die Anfrage übernommen. Der angezeigte Netto-Auszahlungsbetrag wurde bestätigt.',priceEuro:(amounts.price_cents/100).toFixed(2),commissionEuro:(amounts.commission_cents/100).toFixed(2),driverPayoutEuro:(amounts.driver_payout_cents/100).toFixed(2)});
 });
 app.post('/api/rides/:id/cancel',requireRole('driver'),(req,res)=>{
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
@@ -432,13 +440,13 @@ app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
 app.get('/api/support/contact',(req,res)=>{const row=db.prepare('SELECT value FROM settings WHERE key=?').get('support_email');res.json({email:row?.value||''});});
 app.get('/api/admin/settings',requireRole('admin'),(req,res)=>{
  const rows=db.prepare('SELECT key,value,updated_at FROM settings ORDER BY key').all(),values=Object.fromEntries(rows.map(r=>[r.key,r.value]));
- res.json({settings:{site_name:values.site_name||'HelferFix',platform_fee_percent:values.platform_fee_percent||'10',support_email:values.support_email||''}});
+ res.json({settings:{site_name:values.site_name||'HelferFix',platform_fee_percent:values.platform_fee_percent||'5',support_email:values.support_email||''}});
 });
 app.put('/api/admin/settings',requireRole('admin'),(req,res)=>{
  const siteName=clean(req.body.site_name,80),supportEmail=clean(req.body.support_email,254),fee=Number(req.body.platform_fee_percent);
  if(!siteName||!Number.isFinite(fee)||fee<0||fee>30||(supportEmail&&!emailOk(supportEmail)))return res.status(400).json({error:'Bitte prüfe Name, E-Mail und Gebühr (0–30 %).'});
  const save=db.transaction(()=>{for(const [key,value] of Object.entries({site_name:siteName,platform_fee_percent:String(fee),support_email:supportEmail}))db.prepare('INSERT INTO settings(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP').run(key,value);});
- save();res.json({message:'Einstellungen gespeichert. Die Provision wird nur berechnet, nicht eingezogen.'});
+ save();res.json({message:'Einstellungen gespeichert. Die Provision wird berechnet, aber noch nicht eingezogen; eine Auszahlung über Zahlungsanbieter ist nicht eingerichtet.'});
 });
 app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Interner Fehler.'});});
