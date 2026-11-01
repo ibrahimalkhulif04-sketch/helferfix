@@ -105,8 +105,57 @@ try{JSON.parse(localStorage.getItem('helferfixSeenNotices')||'[]').forEach(id=>s
 function noticeBody(n){if(n.kind==='message')return t('newMessageNotice');const statusKey=({new:'statusNew',quoted:'statusQuoted',accepted:'statusAccepted',cancelled:'statusCancelled',completed:'statusCompleted'})[n.status]||'statusUpdated';return `${t('statusChangedNotice')} ${t(statusKey)}.`;}
 function rememberNotice(id){seenNoticeIds.add(String(id));while(seenNoticeIds.size>150)seenNoticeIds.delete(seenNoticeIds.values().next().value);try{localStorage.setItem('helferfixSeenNotices',JSON.stringify([...seenNoticeIds]));}catch{}}
 async function pollNotifications(){if(notificationPollBusy||!me)return;notificationPollBusy=true;try{const d=await api('/api/notifications/unread');const unread=d.notifications||[];const messages=unread.filter(n=>n.kind==='message');unreadByRide={};for(const n of messages){const id=Number(n.ride_request_id);unreadByRide[id]=(unreadByRide[id]||0)+1;}updateUnreadBadge(messages.length);for(const n of unread){if(!seenNoticeIds.has(String(n.id))){rememberNotice(n.id);const body=noticeBody(n);if(document.visibilityState==='visible')flash(body,'success');else if('Notification'in window&&Notification.permission==='granted'&&!pushEnabled){try{new Notification('HelferFix',{body});}catch{}}}}const statusIds=unread.filter(n=>n.kind==='status').map(n=>n.id);if(statusIds.length)await api('/api/notifications/read',{method:'POST',body:JSON.stringify({ids:statusIds})});if(currentChatRideId&&!$('chatPanel').classList.contains('hidden')){await loadChat();await clearCurrentChatNotifications();}}catch(e){/* notifications are supplementary; keep the app usable */}finally{notificationPollBusy=false;}}
-async function setupPush(){if(!('serviceWorker'in navigator)||!('PushManager'in window)||!('Notification'in window)||Notification.permission!=='granted')return false;try{const cfg=await api('/api/push/public-key');if(!cfg.enabled||!cfg.publicKey)return false;const registration=await navigator.serviceWorker.ready;const normalized=cfg.publicKey.replace(/-/g,'+').replace(/_/g,'/');const padded=normalized+'='.repeat((4-normalized.length%4)%4);const binary=atob(padded);const key=new Uint8Array([...binary].map(c=>c.charCodeAt(0)));let subscription=await registration.pushManager.getSubscription();if(subscription){const oldKey=subscription.options&&subscription.options.applicationServerKey;const oldBytes=oldKey?new Uint8Array(oldKey):null;const sameKey=!!oldBytes&&oldBytes.length===key.length&&key.every((value,index)=>value===oldBytes[index]);if(!sameKey){await api('/api/push/subscribe',{method:'DELETE',body:JSON.stringify({endpoint:subscription.endpoint})}).catch(()=>{});await subscription.unsubscribe();subscription=null;}}if(!subscription)subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});await api('/api/push/subscribe',{method:'POST',body:JSON.stringify({subscription:subscription.toJSON(),language:lang})});pushEnabled=true;renderSignedIn();return true;}catch(e){pushEnabled=false;renderSignedIn();return false;}}
-$('enableNotificationsBtn').onclick=async()=>{if(!('Notification'in window)){flash(t('pushUnavailable'),'error');return;}try{const permission=await Notification.requestPermission();if(permission==='granted'){const ok=await setupPush();flash(ok?t('notificationsEnabled'):t('pushUnavailable'),ok?'success':'error');}else flash(t('pushUnavailable'),'error');renderSignedIn();}catch(e){flash(t('pushUnavailable'),'error');}};
+let pushLastError='';
+async function setupPush(){
+ pushLastError='';
+ if(!('serviceWorker'in navigator)){pushLastError='Service Worker API is unavailable in this app.';return false;}
+ if(!('PushManager'in window)){pushLastError='Push API is unavailable in this app.';return false;}
+ if(!('Notification'in window)){pushLastError='Notification API is unavailable in this app.';return false;}
+ if(Notification.permission!=='granted'){pushLastError='Notification permission is '+Notification.permission+'.';return false;}
+ try{
+  const cfg=await api('/api/push/public-key');
+  if(!cfg.enabled||!cfg.publicKey){pushLastError='The server reports that Web Push is disabled.';return false;}
+  const registration=await navigator.serviceWorker.ready;
+  const normalized=cfg.publicKey.replace(/-/g,'+').replace(/_/g,'/');
+  const padded=normalized+'='.repeat((4-normalized.length%4)%4);
+  const binary=atob(padded);
+  const key=new Uint8Array([...binary].map(c=>c.charCodeAt(0)));
+  let subscription=await registration.pushManager.getSubscription();
+  if(subscription){
+   const oldKey=subscription.options&&subscription.options.applicationServerKey;
+   const oldBytes=oldKey?new Uint8Array(oldKey):null;
+   const sameKey=!!oldBytes&&oldBytes.length===key.length&&key.every((value,index)=>value===oldBytes[index]);
+   if(!sameKey){
+    await api('/api/push/subscribe',{method:'DELETE',body:JSON.stringify({endpoint:subscription.endpoint})}).catch(()=>{});
+    await subscription.unsubscribe();
+    subscription=null;
+   }
+  }
+  if(!subscription)subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+  await api('/api/push/subscribe',{method:'POST',body:JSON.stringify({subscription:subscription.toJSON(),language:lang})});
+  pushEnabled=true;
+  console.info('[push] browser subscription registered with server');
+  renderSignedIn();
+  return true;
+ }catch(e){
+  pushLastError=e&&e.message?e.message:String(e);
+  console.error('[push] setup failed:',pushLastError,e);
+  pushEnabled=false;
+  renderSignedIn();
+  return false;
+ }
+}
+$('enableNotificationsBtn').onclick=async()=>{
+ if(!('Notification'in window)){flash(t('pushUnavailable')+' (Notification API unavailable)','error');return;}
+ try{
+  const permission=await Notification.requestPermission();
+  if(permission==='granted'){
+   const ok=await setupPush();
+   flash(ok?t('notificationsEnabled'):(t('pushUnavailable')+' — '+(pushLastError||'Unknown setup error')),ok?'success':'error');
+  }else flash(t('pushUnavailable')+' (permission: '+permission+')','error');
+  renderSignedIn();
+ }catch(e){const detail=e&&e.message?e.message:String(e);pushLastError=detail;console.error('[push] permission request failed:',e);flash(t('pushUnavailable')+' — '+detail,'error');}
+};
 function startNotificationPolling(){if(noticeTimer)clearInterval(noticeTimer);if(panelTimer)clearInterval(panelTimer);if(me){if('Notification'in window&&Notification.permission==='granted')setupPush();pollNotifications();noticeTimer=setInterval(pollNotifications,5000);panelTimer=setInterval(()=>{if(document.hidden||!me)return;if(me.role==='customer')loadCustomerRides();else if(me.role==='driver')loadDriver();else if(me.role==='admin'&&adminTab==='rides')loadAdmin();},4000);}}
 async function refreshPanels(){renderSignedIn();startNotificationPolling();if(!me)return;if(me.role==='customer')await loadCustomerRides();if(me.role==='driver')await loadDriver();if(me.role==='admin')await loadAdmin();}
 async function init(){setLanguage(lang);setMode('login');updateServiceFields();updateDateTimeMin();try{const d=await api('/api/me');me=d.user;renderSignedIn();await refreshPanels();}catch{me=null;renderSignedIn();}}
@@ -115,7 +164,9 @@ init();
 <script>
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/service-worker.js");
+    navigator.serviceWorker.register("/service-worker.js")
+      .then(registration => console.info('[push] service worker ready:', registration.scope))
+      .catch(error => console.error('[push] service worker registration failed:', error));
   });
 }
 </script>
