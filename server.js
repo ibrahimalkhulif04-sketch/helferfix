@@ -120,7 +120,7 @@ const OPENAI_SUPPORT_MODEL = String(process.env.OPENAI_SUPPORT_MODEL || 'gpt-4.1
 app.use(express.static(path.join(__dirname, 'public')));
 // TEMPORARY diagnostics for customer request edits; logs contain no personal field values.
 app.use((req,res,next)=>{
- if(req.method==='PATCH' && /^\/api\/rides\/\d+$/.test(req.path)){
+ if(req.method==='PATCH' && req.path.startsWith('/api/rides/') && /^\d+$/.test(req.path.slice('/api/rides/'.length))){
   const started=Date.now();
   console.info('[ride-edit] request received',JSON.stringify({pid:process.pid,dbFile:path.resolve(dataDir,'helferfix.sqlite'),path:req.path,contentType:req.get('content-type')||'',contentLength:req.get('content-length')||''}));
   res.on('finish',()=>console.info('[ride-edit] request finished',JSON.stringify({pid:process.pid,path:req.path,httpStatus:res.statusCode,durationMs:Date.now()-started})));
