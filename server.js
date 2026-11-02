@@ -118,6 +118,15 @@ const supportAiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standar
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const OPENAI_SUPPORT_MODEL = String(process.env.OPENAI_SUPPORT_MODEL || 'gpt-4.1-mini').trim();
 app.use(express.static(path.join(__dirname, 'public')));
+// TEMPORARY diagnostics for customer request edits; logs contain no personal field values.
+app.use((req,res,next)=>{
+ if(req.method==='PATCH' && /^\\/api\\/rides\\/\\d+$/.test(req.path)){
+  const started=Date.now();
+  console.info('[ride-edit] request received',JSON.stringify({pid:process.pid,dbFile:path.resolve(dataDir,'helferfix.sqlite'),path:req.path,contentType:req.get('content-type')||'',contentLength:req.get('content-length')||''}));
+  res.on('finish',()=>console.info('[ride-edit] request finished',JSON.stringify({pid:process.pid,path:req.path,httpStatus:res.statusCode,durationMs:Date.now()-started})));
+ }
+ next();
+});
 const emailOk = s => typeof s === 'string' && s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 const clean = (v, max=180) => typeof v === 'string' ? v.trim().slice(0,max) : '';
 function currentUser(req) {
@@ -340,8 +349,10 @@ app.get('/api/rides/:id/edit',requireRole('customer'),(req,res)=>{
 });
 app.patch('/api/rides/:id',requireRole('customer'),(req,res)=>{
  const id=Number(req.params.id),b=req.body||{};
+ console.info('[ride-edit] handler entered',JSON.stringify({pid:process.pid,dbFile:path.resolve(dataDir,'helferfix.sqlite'),rideId:id,userId:req.user.id,bodyKeys:Object.keys(b).sort(),serviceType:typeof b.serviceType==='string'?b.serviceType:'',travelDate:typeof b.travelDate==='string'?b.travelDate:'',travelTime:typeof b.travelTime==='string'?b.travelTime:'',priceEuro:typeof b.priceEuro==='number'||typeof b.priceEuro==='string'?String(b.priceEuro).slice(0,20):typeof b.priceEuro}));
  const old=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
- if(!old)return res.status(404).json({error:'Anfrage nicht gefunden.'});
+ if(!old){console.warn('[ride-edit] existing request not found',JSON.stringify({pid:process.pid,rideId:id,userId:req.user.id,dbFile:path.resolve(dataDir,'helferfix.sqlite')}));return res.status(404).json({error:'Anfrage nicht gefunden.'});}
+ console.info('[ride-edit] existing row',JSON.stringify({pid:process.pid,rideId:id,userId:req.user.id,status:old.status,assigned:!!old.assigned_driver_id,priceCents:old.price_cents,travelDate:old.travel_date,travelTime:old.travel_time,pickupLength:String(old.pickup||'').length,destinationLength:String(old.destination||'').length}));
  if(!['new','quoted'].includes(old.status)||old.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Änderung nur über den Support möglich.'});
  const type=['airport','garden','moving','multi'].includes(b.serviceType)?b.serviceType:null;
  const pickup=clean(b.pickup,180),destination=clean(b.destination,180),date=clean(b.travelDate,10),time=clean(b.travelTime,5),price=Number(b.priceEuro);
@@ -366,9 +377,11 @@ app.patch('/api/rides/:id',requireRole('customer'),(req,res)=>{
  const cents=Math.round(price*100),commission=Math.round(cents*feePercent()/100);
  const changed=db.prepare("UPDATE ride_requests SET service_type=?,pickup=?,destination=?,travel_date=?,travel_time=?,passengers=?,luggage=?,vehicle_type=?,notes=?,price_cents=?,commission_cents=?,driver_payout_cents=?,garden_task=?,garden_size_m2=?,garden_hours=?,moving_task=?,pickup_floor=?,destination_floor=?,pickup_elevator=?,destination_elevator=?,item_count=?,need_helpers=?,need_van=?,child_count=?,child_seats_needed=?,child_ages_heights=?,child_seat_provider=?,service_description=?,photos_json=?,status='new',admin_approved_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL")
  .run(type,pickup||'—',(type==='garden'||type==='multi')?(pickup||'—'):destination,date,time,passengers,luggage,type==='airport'?(b.vehicleType||'PKW'):'',clean(b.notes,1000)||null,cents,commission,cents-commission,type==='garden'?gardenTask:null,type==='garden'?gardenSize:null,type==='garden'?gardenHours:null,type==='moving'?movingTask:null,type==='moving'?pickupFloor:null,type==='moving'?destinationFloor:null,type==='moving'?pickupElevator:null,type==='moving'?destinationElevator:null,type==='moving'?itemCount:null,type==='moving'?needHelpers:null,type==='moving'?needVan:null,childCount,childSeats,childAges||null,seatProvider,type==='multi'?desc:null,photosJson,id,req.user.id);
+ console.info('[ride-edit] SQL update result',JSON.stringify({pid:process.pid,rideId:id,userId:req.user.id,changes:changed.changes,dbFile:path.resolve(dataDir,'helferfix.sqlite')}));
  if(!changed.changes)return res.status(409).json({error:'Die Anfrage wurde inzwischen angenommen oder geändert.'});
  db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,'customer_edit',?,?,?)").run(id,req.user.id,'customer',old.status,'new',JSON.stringify({service_type:type,price_cents:cents}));
  const updated=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);
+ console.info('[ride-edit] row after update',JSON.stringify({pid:process.pid,rideId:id,status:updated?.status,priceCents:updated?.price_cents,travelDate:updated?.travel_date,travelTime:updated?.travel_time,pickupLength:String(updated?.pickup||'').length,destinationLength:String(updated?.destination||'').length,dbFile:path.resolve(dataDir,'helferfix.sqlite')}));
  if(old.status==='quoted')notifyRideStatus(updated,'new',req.user.id);
  res.json({message:'Anfrage geändert. Sie wartet erneut auf die Admin-Freigabe.'});
 });
