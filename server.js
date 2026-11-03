@@ -568,7 +568,9 @@ app.get('/api/rides/:id/messages',requireRole('customer','driver'),(req,res)=>{
  // Opening the conversation marks incoming messages as delivered and read.
  db.prepare('UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP),read_at=COALESCE(read_at,CURRENT_TIMESTAMP) WHERE ride_request_id=? AND sender_id<>?').run(id,req.user.id);
  const messages=db.prepare('SELECT m.id,m.sender_id,m.message,m.created_at,m.delivered_at,m.read_at,u.name AS sender_name FROM chat_messages m JOIN users u ON u.id=m.sender_id WHERE m.ride_request_id=? ORDER BY m.id DESC LIMIT 200').all(id).reverse();
- res.json({messages});
+ const counterpartId=req.user.role==='customer'?ride.assigned_driver_id:ride.customer_id;
+ const counterpart=db.prepare('SELECT name FROM users WHERE id=?').get(counterpartId);
+ res.json({counterpartName:counterpart?.name||'',messages});
 });
 app.post('/api/rides/:id/messages',requireRole('customer','driver'),(req,res)=>{
  const id=Number(req.params.id); if(!Number.isInteger(id)||id<1)return res.status(400).json({error:'Ungültige Anfrage.'});
