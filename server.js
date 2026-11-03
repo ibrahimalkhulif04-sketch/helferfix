@@ -376,6 +376,15 @@ app.post('/api/ratings',requireRole('customer','driver'),(req,res)=>{
  catch(e){if(String(e.message).includes('UNIQUE'))return res.status(409).json({error:'Du hast diesen Auftrag bereits bewertet.'});throw e;}
  res.status(201).json({ok:true});
 });
+app.patch('/api/profile/password',requireRole('customer','driver'),async(req,res)=>{
+ const current=typeof req.body?.currentPassword==='string'?req.body.currentPassword:'';
+ const next=typeof req.body?.newPassword==='string'?req.body.newPassword:'';
+ if(next.length<8||next.length>200)return res.status(400).json({error:'Das neue Passwort muss mindestens 8 Zeichen haben.'});
+ const row=db.prepare('SELECT password_hash FROM users WHERE id=?').get(req.user.id);
+ if(!current||!(await bcrypt.compare(current,row.password_hash)))return res.status(401).json({error:'Das aktuelle Passwort ist nicht korrekt.'});
+ const hash=await bcrypt.hash(next,12);db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hash,req.user.id);
+ res.json({ok:true});
+});
 app.post('/api/account/delete',requireRole('customer','driver'),async(req,res)=>{
  const password=typeof req.body?.password==='string'?req.body.password:'';
  const row=db.prepare('SELECT id,password_hash,role FROM users WHERE id=?').get(req.user.id);
