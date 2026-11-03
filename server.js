@@ -77,6 +77,7 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
 if (!userColumns.includes('notify_new_requests')) db.exec('ALTER TABLE users ADD COLUMN notify_new_requests INTEGER NOT NULL DEFAULT 0');
+if (!userColumns.includes('phone_encrypted')) db.exec('ALTER TABLE users ADD COLUMN phone_encrypted TEXT');
 
 // Safe, additive migration: add delivery and read receipts without changing existing messages or accounts.
 const chatMessageColumns = db.prepare('PRAGMA table_info(chat_messages)').all().map(c => c.name);
@@ -153,6 +154,24 @@ app.use((req,res,next)=>{
 });
 const emailOk = s => typeof s === 'string' && s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 const clean = (v, max=180) => typeof v === 'string' ? v.trim().slice(0,max) : '';
+// Phone numbers are encrypted at rest; only the authenticated account owner can decrypt them.
+const phoneEncryptionKey = crypto.createHash('sha256').update(String(process.env.PHONE_ENCRYPTION_KEY || process.env.SESSION_SECRET || 'development-only-secret-change-me-now-please')).digest();
+function encryptPhone(value) {
+ if (!value) return null;
+ const iv = crypto.randomBytes(12);
+ const cipher = crypto.createCipheriv('aes-256-gcm', phoneEncryptionKey, iv);
+ const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+ return [iv.toString('base64'), cipher.getAuthTag().toString('base64'), encrypted.toString('base64')].join('.');
+}
+function decryptPhone(value) {
+ if (!value) return '';
+ try {
+  const [iv, tag, encrypted] = value.split('.');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', phoneEncryptionKey, Buffer.from(iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(tag, 'base64'));
+  return Buffer.concat([decipher.update(Buffer.from(encrypted, 'base64')), decipher.final()]).toString('utf8');
+ } catch { return ''; }
+}
 function currentUser(req) {
  if (!req.session.userId) return null;
  return db.prepare('SELECT id,name,email,role,created_at,active,notify_new_requests FROM users WHERE id=?').get(req.session.userId) || null;
@@ -287,6 +306,18 @@ app.patch('/api/driver/notification-preferences',requireRole('driver'),(req,res)
 });
 
 app.get('/api/me',(req,res)=>res.json({user:currentUser(req)}));
+// Private profile endpoints: phone data is never added to public ride, chat, or admin responses.
+app.get('/api/profile',requireRole('customer','driver'),(req,res)=>{
+ const row=db.prepare('SELECT name,email,phone_encrypted FROM users WHERE id=?').get(req.user.id);
+ res.json({profile:{name:row.name,email:row.email,phone:decryptPhone(row.phone_encrypted)}});
+});
+app.patch('/api/profile/phone',requireRole('customer','driver'),(req,res)=>{
+ const phone=clean(req.body?.phone,30);
+ const digits=phone.replace(/\\D/g,'');
+ if(phone && (!/^[+0-9() .\\/-]+$/.test(phone) || digits.length<7 || digits.length>20)) return res.status(400).json({error:'Bitte gib eine gültige Telefonnummer ein.'});
+ db.prepare('UPDATE users SET phone_encrypted=? WHERE id=?').run(encryptPhone(phone),req.user.id);
+ res.json({ok:true,phone});
+});
 app.post('/api/auth/register',async(req,res)=>{
  const name=clean(req.body.name,100),email=clean(req.body.email,254).toLowerCase(),password=typeof req.body.password==='string'?req.body.password:'',role=req.body.role;
  if(name.length<4||!emailOk(email)||password.length<8||password.length>200||password!==String(req.body.confirmPassword||'')||!['customer','driver'].includes(role))return res.status(400).json({error:'Bitte Name, gültige E-Mail, Passwort (mind. 8 Zeichen) und passende Bestätigung und Rolle korrekt angeben.'});
