@@ -106,12 +106,23 @@ for (const [column, definition] of Object.entries({
 async function ensureAdmin() {
  const email = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
  const password = process.env.ADMIN_PASSWORD || '';
+ const resetExistingAdmin = process.env.ADMIN_PASSWORD_RESET === '1';
  if (!email || !password) { console.warn('ADMIN_EMAIL/ADMIN_PASSWORD not configured; admin bootstrap skipped.'); return; }
- const existing = db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get();
- if (!existing) {
+ const matchingAdmin = db.prepare("SELECT id FROM users WHERE role='admin' AND lower(email)=? LIMIT 1").get(email);
+ if (matchingAdmin && resetExistingAdmin) {
+  const hash = await bcrypt.hash(password, 12);
+  db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hash, matchingAdmin.id);
+  console.log('One-time admin password reset completed.');
+  return;
+ }
+ if (matchingAdmin) return;
+ const anyAdmin = db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get();
+ if (!anyAdmin) {
   const hash = await bcrypt.hash(password, 12);
   db.prepare("INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,'admin')").run('HelferFix Admin', email, hash);
-  console.log(`Initial admin created for ${email}.`);
+  console.log('Initial admin account created.');
+ } else {
+  console.warn('Admin bootstrap skipped: configured email does not match the existing admin.');
  }
 }
 app.disable('x-powered-by');
