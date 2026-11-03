@@ -25,6 +25,19 @@ self.addEventListener('push', event => {
     };
 
     await self.registration.showNotification(title, options);
+
+    // Acknowledge chat delivery only after this device receives the push event.
+    if (data.kind === 'message' && Number.isInteger(Number(data.notificationId))) {
+      await fetch('/api/push/delivered', {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notificationId: Number(data.notificationId) })
+      }).catch(error => {
+        console.warn('[push] chat delivery acknowledgement failed:', error && error.message || error);
+      });
+    }
   })());
 });
 
