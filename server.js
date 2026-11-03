@@ -78,6 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
 if (!userColumns.includes('notify_new_requests')) db.exec('ALTER TABLE users ADD COLUMN notify_new_requests INTEGER NOT NULL DEFAULT 0');
 if (!userColumns.includes('phone_encrypted')) db.exec('ALTER TABLE users ADD COLUMN phone_encrypted TEXT');
+if (!userColumns.includes('name_changed_at')) db.exec('ALTER TABLE users ADD COLUMN name_changed_at TEXT');
 
 // Safe, additive migration: add delivery and read receipts without changing existing messages or accounts.
 const chatMessageColumns = db.prepare('PRAGMA table_info(chat_messages)').all().map(c => c.name);
@@ -335,6 +336,20 @@ app.get('/api/me',(req,res)=>res.json({user:currentUser(req)}));
 app.get('/api/profile',requireRole('customer','driver'),(req,res)=>{
  const row=db.prepare('SELECT name,email,phone_encrypted FROM users WHERE id=?').get(req.user.id);
  res.json({profile:{name:row.name,email:row.email,phone:decryptPhone(row.phone_encrypted)}});
+});
+app.patch('/api/profile/name',requireRole('customer','driver'),(req,res)=>{
+ const name=clean(req.body?.name,100);
+ if(name.length<4)return res.status(400).json({error:'Der Name muss mindestens 4 Zeichen haben.'});
+ const row=db.prepare('SELECT name_changed_at FROM users WHERE id=?').get(req.user.id);
+ if(row.name_changed_at){
+  const changedAt=Date.parse(row.name_changed_at.replace(' ','T')+'Z');
+  if(Number.isFinite(changedAt)&&Date.now()-changedAt<90*24*60*60*1000){
+   const nextDate=new Date(changedAt+90*24*60*60*1000);
+   return res.status(429).json({error:'Der Name kann nur alle 90 Tage geändert werden. Nächste Änderung ab '+nextDate.toLocaleDateString('de-DE')+'.'});
+  }
+ }
+ db.prepare('UPDATE users SET name=?,name_changed_at=CURRENT_TIMESTAMP WHERE id=?').run(name,req.user.id);
+ res.json({ok:true,name});
 });
 app.patch('/api/profile/phone',requireRole('customer','driver'),(req,res)=>{
  const phone=clean(req.body?.phone,30);
