@@ -104,6 +104,31 @@ for (const [column, definition] of Object.entries({
  if (!existingRideColumns.has(column)) { db.exec(`ALTER TABLE ride_requests ADD COLUMN ${column} ${definition}`); existingRideColumns.add(column); }
 }
 
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS provider_service_areas (
+ user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ base_plz TEXT NOT NULL,
+ radius_km INTEGER NOT NULL DEFAULT 25 CHECK(radius_km IN (10,25,50,100)),
+ states_json TEXT NOT NULL DEFAULT '[]',
+ postal_codes_json TEXT NOT NULL DEFAULT '[]',
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS ratings (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ ride_request_id INTEGER NOT NULL,
+ from_user_id INTEGER NOT NULL,
+ to_user_id INTEGER NOT NULL,
+ stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5),
+ comment TEXT,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(ride_request_id,from_user_id),
+ CHECK(from_user_id <> to_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ratings_to_user ON ratings(to_user_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ratings_from_user ON ratings(from_user_id,created_at DESC);
+`);
+
 async function ensureAdmin() {
  const email = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
  const password = process.env.ADMIN_PASSWORD || '';
@@ -318,6 +343,60 @@ app.patch('/api/profile/phone',requireRole('customer','driver'),(req,res)=>{
  db.prepare('UPDATE users SET phone_encrypted=? WHERE id=?').run(encryptPhone(phone),req.user.id);
  res.json({ok:true,phone});
 });
+
+app.get('/api/profile/service-area',requireRole('driver'),(req,res)=>{
+ const row=db.prepare('SELECT base_plz,radius_km,states_json,postal_codes_json FROM provider_service_areas WHERE user_id=?').get(req.user.id);
+ let states=[],postalCodes=[];try{states=JSON.parse(row?.states_json||'[]');}catch{}try{postalCodes=JSON.parse(row?.postal_codes_json||'[]');}catch{}
+ res.json({serviceArea:row?{basePlz:row.base_plz,radiusKm:row.radius_km,states,postalCodes}:{basePlz:'',radiusKm:25,states:[],postalCodes:[]}});
+});
+app.patch('/api/profile/service-area',requireRole('driver'),(req,res)=>{
+ const basePlz=String(req.body?.basePlz||'').trim(),radiusKm=Number(req.body?.radiusKm);
+ const allowedStates=['Baden-Württemberg','Bayern','Berlin','Brandenburg','Bremen','Hamburg','Hessen','Mecklenburg-Vorpommern','Niedersachsen','Nordrhein-Westfalen','Rheinland-Pfalz','Saarland','Sachsen','Sachsen-Anhalt','Schleswig-Holstein','Thüringen'];
+ const states=Array.isArray(req.body?.states)?[...new Set(req.body.states.filter(x=>allowedStates.includes(x)))]:[];
+ const postalCodes=Array.isArray(req.body?.postalCodes)?[...new Set(req.body.postalCodes.map(x=>String(x).trim()).filter(x=>/^\\d{5}$/.test(x)))].slice(0,100):[];
+ if(!/^\\d{5}$/.test(basePlz)||![10,25,50,100].includes(radiusKm)||!Array.isArray(req.body?.states)||!Array.isArray(req.body?.postalCodes)||states.length!==req.body.states.length||req.body.postalCodes.some(x=>!/^\\d{5}$/.test(String(x).trim())))return res.status(400).json({error:'Bitte gib eine gültige fünfstellige PLZ, einen Radius und gültige Gebiete an.'});
+ db.prepare(`INSERT INTO provider_service_areas(user_id,base_plz,radius_km,states_json,postal_codes_json) VALUES(?,?,?,?,?)
+ ON CONFLICT(user_id) DO UPDATE SET base_plz=excluded.base_plz,radius_km=excluded.radius_km,states_json=excluded.states_json,postal_codes_json=excluded.postal_codes_json,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,basePlz,radiusKm,JSON.stringify(states),JSON.stringify(postalCodes));
+ res.json({ok:true,serviceArea:{basePlz,radiusKm,states,postalCodes}});
+});
+app.get('/api/profile/ratings',requireRole('customer','driver'),(req,res)=>{
+ const received=db.prepare('SELECT r.id,r.ride_request_id,r.stars,r.comment,r.created_at,u.name AS from_name FROM ratings r JOIN users u ON u.id=r.from_user_id WHERE r.to_user_id=? ORDER BY r.created_at DESC').all(req.user.id);
+ const given=db.prepare('SELECT r.id,r.ride_request_id,r.stars,r.comment,r.created_at,u.name AS to_name FROM ratings r JOIN users u ON u.id=r.to_user_id WHERE r.from_user_id=? ORDER BY r.created_at DESC').all(req.user.id);
+ const avg=received.length?received.reduce((n,r)=>n+r.stars,0)/received.length:0;
+ res.json({received,given,average:Number(avg.toFixed(2)),count:received.length});
+});
+app.post('/api/ratings',requireRole('customer','driver'),(req,res)=>{
+ const rideId=Number(req.body?.rideId),stars=Number(req.body?.stars),comment=clean(req.body?.comment,1000);
+ if(!Number.isInteger(rideId)||rideId<1||!Number.isInteger(stars)||stars<1||stars>5)return res.status(400).json({error:'Bitte wähle eine Anfrage und 1 bis 5 Sterne.'});
+ const ride=db.prepare("SELECT id,customer_id,assigned_driver_id,status FROM ride_requests WHERE id=?").get(rideId);
+ if(!ride||ride.status!=='completed')return res.status(409).json({error:'Bewertungen sind nur nach abgeschlossenen Aufträgen möglich.'});
+ const other=req.user.id===ride.customer_id?ride.assigned_driver_id:req.user.id===ride.assigned_driver_id?ride.customer_id:null;
+ if(!other||other===req.user.id)return res.status(403).json({error:'Du bist nicht an diesem Auftrag beteiligt.'});
+ try{db.prepare('INSERT INTO ratings(ride_request_id,from_user_id,to_user_id,stars,comment) VALUES(?,?,?,?,?)').run(rideId,req.user.id,other,stars,comment||null);}
+ catch(e){if(String(e.message).includes('UNIQUE'))return res.status(409).json({error:'Du hast diesen Auftrag bereits bewertet.'});throw e;}
+ res.status(201).json({ok:true});
+});
+app.post('/api/account/delete',requireRole('customer','driver'),async(req,res)=>{
+ const password=typeof req.body?.password==='string'?req.body.password:'';
+ const row=db.prepare('SELECT id,password_hash,role FROM users WHERE id=?').get(req.user.id);
+ if(!password||!(await bcrypt.compare(password,row.password_hash)))return res.status(401).json({error:'Das Passwort ist nicht korrekt.'});
+ const id=req.user.id;
+ const tx=db.transaction(()=>{
+  db.prepare('DELETE FROM push_subscriptions WHERE user_id=?').run(id);
+  db.prepare('DELETE FROM chat_notifications WHERE recipient_id=?').run(id);
+  db.prepare('DELETE FROM app_notifications WHERE recipient_id=?').run(id);
+  db.prepare('DELETE FROM password_reset_tokens WHERE user_id=?').run(id);
+  db.prepare('DELETE FROM ratings WHERE from_user_id=? OR to_user_id=?').run(id,id);
+  db.prepare('UPDATE ride_audit_log SET actor_user_id=NULL WHERE actor_user_id=?').run(id);
+  db.prepare('DELETE FROM provider_service_areas WHERE user_id=?').run(id);
+  const anonEmail='deleted-'+id+'@account.invalid';
+  const randomHash=bcrypt.hashSync(crypto.randomBytes(48).toString('hex'),12);
+  db.prepare("UPDATE users SET name='Gelöschtes Konto',email=?,password_hash=?,phone_encrypted=NULL,notify_new_requests=0,active=0 WHERE id=?").run(anonEmail,randomHash,id);
+ });
+ tx();
+ req.session.destroy(()=>{res.clearCookie('connect.sid');res.json({ok:true,message:'Das Konto wurde deaktiviert und persönliche Kontaktdaten wurden entfernt. Gesetzlich erforderliche Auftragsdaten bleiben anonymisiert erhalten.'});});
+});
+
 app.post('/api/auth/register',async(req,res)=>{
  const name=clean(req.body.name,100),email=clean(req.body.email,254).toLowerCase(),password=typeof req.body.password==='string'?req.body.password:'',role=req.body.role;
  if(name.length<4||!emailOk(email)||password.length<8||password.length>200||password!==String(req.body.confirmPassword||'')||!['customer','driver'].includes(role))return res.status(400).json({error:'Bitte Name, gültige E-Mail, Passwort (mind. 8 Zeichen) und passende Bestätigung und Rolle korrekt angeben.'});
