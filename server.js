@@ -7,6 +7,8 @@ const bcrypt = require('bcryptjs');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const fs = require('fs');
 let webPush = null;
 try { webPush = require('web-push'); } catch (e) { console.warn('web-push package is not installed; browser push is disabled until dependencies are installed.'); }
@@ -63,6 +65,16 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (id INTEGER PRIMARY KEY AUTOINCREM
 CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id);
 `);
 
+db.exec(`CREATE TABLE IF NOT EXISTS password_reset_tokens (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ token_hash TEXT NOT NULL UNIQUE,
+ expires_at INTEGER NOT NULL,
+ created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id);
+`);
+
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
 if (!userColumns.includes('notify_new_requests')) db.exec('ALTER TABLE users ADD COLUMN notify_new_requests INTEGER NOT NULL DEFAULT 0');
 
@@ -114,6 +126,7 @@ app.use(session({
  cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.COOKIE_SECURE === '1', maxAge: 1000 * 60 * 60 * 12 }
 }));
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false }));
+const forgotPasswordLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Bitte warte und versuche es später erneut.' } });
 const supportAiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Zu viele Nachrichten. Bitte versuche es später erneut.' } });
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const OPENAI_SUPPORT_MODEL = String(process.env.OPENAI_SUPPORT_MODEL || 'gpt-4.1-mini').trim();
@@ -270,6 +283,76 @@ app.post('/api/auth/register',async(req,res)=>{
   req.session.regenerate(err=>{if(err)return res.status(500).json({error:'Sitzung konnte nicht erstellt werden.'});req.session.userId=Number(result.lastInsertRowid);res.status(201).json({user:currentUser(req),message:'Konto erstellt. Angaben des Dienstleisters sind noch nicht geprüft.'});});
  }catch(e){if(String(e.code).includes('SQLITE_CONSTRAINT_UNIQUE'))return res.status(409).json({error:'Diese E-Mail-Adresse ist bereits registriert.'});console.error(e);res.status(500).json({error:'Registrierung fehlgeschlagen.'});}
 });
+
+const resetMailUser = String(process.env.GMAIL_USER || '').trim();
+const resetMailPassword = String(process.env.GMAIL_APP_PASSWORD || '').replace(/\\s/g, '');
+let resetMailer = null;
+if (resetMailUser && resetMailPassword) {
+ resetMailer = nodemailer.createTransport({ service: 'gmail', auth: { user: resetMailUser, pass: resetMailPassword } });
+} else {
+ console.warn('[password-reset] Gmail SMTP is not configured; password reset emails are disabled.');
+}
+app.post('/api/auth/forgot-password', forgotPasswordLimiter, async (req,res) => {
+ const email = clean(req.body?.email,254).toLowerCase();
+ if (!emailOk(email)) return res.status(400).json({error:'Bitte gib eine gültige E-Mail-Adresse ein.'});
+ const genericMessage = 'Wenn ein Konto mit dieser E-Mail-Adresse existiert, wurde ein Link zum Zurücksetzen gesendet.';
+ const user = db.prepare('SELECT id,email FROM users WHERE email=? AND active=1').get(email);
+ if (!user) return res.json({ok:true,message:genericMessage});
+ if (!resetMailer) return res.status(503).json({error:'Der E-Mail-Versand ist derzeit nicht verfügbar. Bitte versuche es später erneut.'});
+ try {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const now = Date.now();
+  db.prepare('DELETE FROM password_reset_tokens WHERE user_id=? OR expires_at<=?').run(user.id,now);
+  db.prepare('INSERT INTO password_reset_tokens(user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?)').run(user.id,tokenHash,now+30*60*1000,now);
+  const baseUrl = String(process.env.APP_BASE_URL || process.env.RENDER_EXTERNAL_URL || (req.protocol + '://' + req.get('host'))).replace(/\\/$/,'');
+  const resetUrl = baseUrl + '/?reset=' + encodeURIComponent(rawToken);
+  const language = ['de','ar','en'].includes(req.body?.language) ? req.body.language : 'de';
+  const copy = {
+   de: {subject:'HelferFix – Passwort zurücksetzen',intro:'Du hast angefordert, dein HelferFix-Passwort zurückzusetzen.',button:'Passwort zurücksetzen',expiry:'Der Link ist 30 Minuten gültig. Wenn du diese Anfrage nicht gestellt hast, ignoriere diese E-Mail.'},
+   ar: {subject:'HelferFix – إعادة تعيين كلمة المرور',intro:'طلبت إعادة تعيين كلمة مرور حسابك في HelferFix.',button:'إعادة تعيين كلمة المرور',expiry:'الرابط صالح لمدة 30 دقيقة. إذا لم تطلب ذلك، فتجاهل هذه الرسالة.'},
+   en: {subject:'HelferFix – Reset your password',intro:'You requested to reset your HelferFix password.',button:'Reset password',expiry:'This link is valid for 30 minutes. If you did not request this, you can ignore this email.'}
+  }[language];
+  await resetMailer.sendMail({
+   from: 'HelferFix <' + resetMailUser + '>',
+   to: user.email,
+   subject: copy.subject,
+   text: copy.intro + '\\n\\n' + resetUrl + '\\n\\n' + copy.expiry,
+   html: '<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px"><h2>HelferFix</h2><p>' + copy.intro + '</p><p><a href="' + resetUrl + '" style="display:inline-block;padding:12px 20px;background:#176b4d;color:#fff;text-decoration:none;border-radius:6px">' + copy.button + '</a></p><p>' + copy.expiry + '</p></div>'
+  });
+  return res.json({ok:true,message:genericMessage});
+ } catch(error) {
+  console.error('[password-reset] email delivery failed:',error.message);
+  return res.status(503).json({error:'Die E-Mail konnte gerade nicht gesendet werden. Bitte versuche es später erneut.'});
+ }
+});
+app.post('/api/auth/reset-password', forgotPasswordLimiter, async (req,res) => {
+ const token = typeof req.body?.token === 'string' ? req.body.token : '';
+ const password = typeof req.body?.password === 'string' ? req.body.password : '';
+ const confirmPassword = typeof req.body?.confirmPassword === 'string' ? req.body.confirmPassword : '';
+ if (!/^[a-f0-9]{64}$/i.test(token)) return res.status(400).json({error:'Der Link ist ungültig oder abgelaufen. Bitte fordere einen neuen Link an.'});
+ if (password.length < 8 || password.length > 200) return res.status(400).json({error:'Das Passwort muss mindestens 8 Zeichen haben.'});
+ if (password !== confirmPassword) return res.status(400).json({error:'Die Passwörter stimmen nicht überein.'});
+ const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+ const row = db.prepare('SELECT user_id FROM password_reset_tokens WHERE token_hash=? AND expires_at>?').get(tokenHash,Date.now());
+ if (!row) return res.status(400).json({error:'Der Link ist ungültig oder abgelaufen. Bitte fordere einen neuen Link an.'});
+ try {
+  const passwordHash = await bcrypt.hash(password,12);
+  const update = db.transaction(() => {
+   const stillValid = db.prepare('SELECT user_id FROM password_reset_tokens WHERE token_hash=? AND expires_at>?').get(tokenHash,Date.now());
+   if (!stillValid) return false;
+   db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(passwordHash,stillValid.user_id);
+   db.prepare('DELETE FROM password_reset_tokens WHERE user_id=?').run(stillValid.user_id);
+   return true;
+  });
+  if (!update()) return res.status(400).json({error:'Der Link ist ungültig oder abgelaufen. Bitte fordere einen neuen Link an.'});
+  return res.json({ok:true,message:'Dein Passwort wurde erfolgreich geändert.'});
+ } catch(error) {
+  console.error('[password-reset] password update failed:',error.message);
+  return res.status(500).json({error:'Das Passwort konnte nicht geändert werden. Bitte versuche es erneut.'});
+ }
+});
+
 app.post('/api/auth/login',async(req,res)=>{
  const email=clean(req.body.email,254).toLowerCase(),password=typeof req.body.password==='string'?req.body.password:'';const user=db.prepare('SELECT * FROM users WHERE email=?').get(email);
  if(!user||!user.active||!(await bcrypt.compare(password,user.password_hash)))return res.status(401).json({error:'E-Mail oder Passwort ist falsch.'});
