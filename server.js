@@ -313,8 +313,8 @@ app.get('/api/profile',requireRole('customer','driver'),(req,res)=>{
 });
 app.patch('/api/profile/phone',requireRole('customer','driver'),(req,res)=>{
  const phone=clean(req.body?.phone,30);
- const digits=phone.replace(/\\D/g,'');
- if(phone && (!/^[+0-9() .\\/-]+$/.test(phone) || digits.length<7 || digits.length>20)) return res.status(400).json({error:'Bitte gib eine gültige Telefonnummer ein.'});
+  const digits=phone.replace(/\D/g,'');
+  if(phone && (!/^[+0-9(). \/-]+$/.test(phone) || digits.length<7 || digits.length>20)) return res.status(400).json({error:'Bitte gib eine gültige Telefonnummer ein.'});
  db.prepare('UPDATE users SET phone_encrypted=? WHERE id=?').run(encryptPhone(phone),req.user.id);
  res.json({ok:true,phone});
 });
