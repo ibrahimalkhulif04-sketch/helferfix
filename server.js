@@ -353,8 +353,8 @@ app.patch('/api/profile/service-area',requireRole('driver'),(req,res)=>{
  const basePlz=String(req.body?.basePlz||'').trim(),radiusKm=Number(req.body?.radiusKm);
  const allowedStates=['Baden-Württemberg','Bayern','Berlin','Brandenburg','Bremen','Hamburg','Hessen','Mecklenburg-Vorpommern','Niedersachsen','Nordrhein-Westfalen','Rheinland-Pfalz','Saarland','Sachsen','Sachsen-Anhalt','Schleswig-Holstein','Thüringen'];
  const states=Array.isArray(req.body?.states)?[...new Set(req.body.states.filter(x=>allowedStates.includes(x)))]:[];
- const postalCodes=Array.isArray(req.body?.postalCodes)?[...new Set(req.body.postalCodes.map(x=>String(x).trim()).filter(x=>/^\\d{5}$/.test(x)))].slice(0,100):[];
- if(!/^\\d{5}$/.test(basePlz)||![10,25,50,100].includes(radiusKm)||!Array.isArray(req.body?.states)||!Array.isArray(req.body?.postalCodes)||states.length!==req.body.states.length||req.body.postalCodes.some(x=>!/^\\d{5}$/.test(String(x).trim())))return res.status(400).json({error:'Bitte gib eine gültige fünfstellige PLZ, einen Radius und gültige Gebiete an.'});
+ const postalCodes=Array.isArray(req.body?.postalCodes)?[...new Set(req.body.postalCodes.map(x=>String(x).trim()).filter(x=>/^\d{5}$/.test(x)))].slice(0,100):[];
+ if(!/^\d{5}$/.test(basePlz)||![10,25,50,100].includes(radiusKm)||!Array.isArray(req.body?.states)||!Array.isArray(req.body?.postalCodes)||states.length!==req.body.states.length||req.body.postalCodes.some(x=>!/^\d{5}$/.test(String(x).trim())))return res.status(400).json({error:'Bitte gib eine gültige fünfstellige PLZ, einen Radius und gültige Gebiete an.'});
  db.prepare(`INSERT INTO provider_service_areas(user_id,base_plz,radius_km,states_json,postal_codes_json) VALUES(?,?,?,?,?)
  ON CONFLICT(user_id) DO UPDATE SET base_plz=excluded.base_plz,radius_km=excluded.radius_km,states_json=excluded.states_json,postal_codes_json=excluded.postal_codes_json,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,basePlz,radiusKm,JSON.stringify(states),JSON.stringify(postalCodes));
  res.json({ok:true,serviceArea:{basePlz,radiusKm,states,postalCodes}});
