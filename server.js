@@ -585,6 +585,18 @@ app.post('/api/rides/:id/messages',requireRole('customer','driver'),(req,res)=>{
  res.status(201).json({message:saved});
 });
 
+// A push event on the recipient's device confirms delivery of a chat message.
+app.post('/api/push/delivered',requireRole('customer','driver'),(req,res)=>{
+ const notificationId=Number(req.body.notificationId);
+ if(!Number.isInteger(notificationId)||notificationId<1)return res.status(400).json({error:'Ungültige Benachrichtigung.'});
+ const result=db.prepare(`UPDATE chat_messages
+  SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP)
+  WHERE id=(SELECT message_id FROM app_notifications WHERE id=? AND recipient_id=? AND kind='message')
+  AND sender_id<>?`).run(notificationId,req.user.id,req.user.id);
+ if(!result.changes)return res.status(404).json({error:'Nachricht nicht gefunden.'});
+ res.json({ok:true});
+});
+
 // Unified unread notifications: chat messages and request-status changes.
 app.get('/api/notifications/unread',requireRole('customer','driver','admin'),(req,res)=>{
  db.prepare(`UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP) WHERE sender_id<>? AND id IN (SELECT message_id FROM app_notifications WHERE recipient_id=? AND read_at IS NULL AND message_id IS NOT NULL)`).run(req.user.id,req.user.id);
