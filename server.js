@@ -394,7 +394,9 @@ app.post('/api/ratings',requireRole('customer','driver'),(req,res)=>{
 app.patch('/api/profile/password',requireRole('customer','driver'),async(req,res)=>{
  const current=typeof req.body?.currentPassword==='string'?req.body.currentPassword:'';
  const next=typeof req.body?.newPassword==='string'?req.body.newPassword:'';
+ const confirmation=typeof req.body?.confirmPassword==='string'?req.body.confirmPassword:'';
  if(next.length<8||next.length>200)return res.status(400).json({error:'Das neue Passwort muss mindestens 8 Zeichen haben.'});
+ if(next!==confirmation)return res.status(400).json({error:'Die neuen Passwörter stimmen nicht überein.'});
  const row=db.prepare('SELECT password_hash FROM users WHERE id=?').get(req.user.id);
  if(!current||!(await bcrypt.compare(current,row.password_hash)))return res.status(401).json({error:'Das aktuelle Passwort ist nicht korrekt.'});
  const hash=await bcrypt.hash(next,12);db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hash,req.user.id);
