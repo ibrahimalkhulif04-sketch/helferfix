@@ -285,7 +285,7 @@ app.post('/api/auth/register',async(req,res)=>{
 });
 
 const resetMailUser = String(process.env.GMAIL_USER || '').trim();
-const resetMailPassword = String(process.env.GMAIL_APP_PASSWORD || '').replace(/\\s/g, '');
+const resetMailPassword = String(process.env.GMAIL_APP_PASSWORD || '').replace(/\s/g, '');
 let resetMailer = null;
 if (resetMailUser && resetMailPassword) {
  resetMailer = nodemailer.createTransport({ service: 'gmail', auth: { user: resetMailUser, pass: resetMailPassword } });
@@ -305,7 +305,7 @@ app.post('/api/auth/forgot-password', forgotPasswordLimiter, async (req,res) => 
   const now = Date.now();
   db.prepare('DELETE FROM password_reset_tokens WHERE user_id=? OR expires_at<=?').run(user.id,now);
   db.prepare('INSERT INTO password_reset_tokens(user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?)').run(user.id,tokenHash,now+30*60*1000,now);
-  const baseUrl = String(process.env.APP_BASE_URL || process.env.RENDER_EXTERNAL_URL || (req.protocol + '://' + req.get('host'))).replace(/\\/$/,'');
+  const baseUrl = String(process.env.APP_BASE_URL || process.env.RENDER_EXTERNAL_URL || (req.protocol + '://' + req.get('host'))).replace(/\/$/,'');
   const resetUrl = baseUrl + '/?reset=' + encodeURIComponent(rawToken);
   const language = ['de','ar','en'].includes(req.body?.language) ? req.body.language : 'de';
   const copy = {
@@ -317,7 +317,7 @@ app.post('/api/auth/forgot-password', forgotPasswordLimiter, async (req,res) => 
    from: 'HelferFix <' + resetMailUser + '>',
    to: user.email,
    subject: copy.subject,
-   text: copy.intro + '\\n\\n' + resetUrl + '\\n\\n' + copy.expiry,
+   text: copy.intro + '\n\n' + resetUrl + '\n\n' + copy.expiry,
    html: '<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px"><h2>HelferFix</h2><p>' + copy.intro + '</p><p><a href="' + resetUrl + '" style="display:inline-block;padding:12px 20px;background:#176b4d;color:#fff;text-decoration:none;border-radius:6px">' + copy.button + '</a></p><p>' + copy.expiry + '</p></div>'
   });
   return res.json({ok:true,message:genericMessage});
