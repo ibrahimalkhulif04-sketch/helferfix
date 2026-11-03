@@ -134,7 +134,7 @@ const accountText={
 function accountLabel(key){return (accountText[lang]||accountText.de)[key]||key;}
 function applyAccountLanguage(){document.querySelectorAll('[data-account-label]').forEach(el=>{el.textContent=accountLabel(el.dataset.accountLabel);});$('accountMenuLabel').textContent=accountLabel('menu');$('accountLanguage').value=lang;}
 function openAccountPage(page){document.querySelectorAll('.account-page').forEach(x=>x.classList.add('hidden'));const target=$('account'+page[0].toUpperCase()+page.slice(1)+'Page');if(target)target.classList.remove('hidden');$('accountMenu').classList.add('hidden');$('accountMenuBtn').setAttribute('aria-expanded','false');if(page==='profile')loadPrivateProfile();if(page==='settings'){loadServiceArea();applyAccountLanguage();}if(page==='ratings')loadRatings();}
-$('accountMenuBtn').onclick=()=>{const menu=$('accountMenu'),show=menu.classList.contains('hidden');menu.classList.toggle('hidden',!show);$('accountMenuBtn').setAttribute('aria-expanded',String(show));};
+$('accountMenuBtn').onclick=()=>{const menu=$('accountMenu'),show=menu.classList.contains('hidden');menu.classList.toggle('hidden',!show);$('accountMenuBtn').setAttribute('aria-expanded',String(show));if(!show){document.querySelectorAll('.account-page').forEach(x=>x.classList.add('hidden'));}};
 document.querySelectorAll('[data-account-page]').forEach(b=>b.addEventListener('click',()=>openAccountPage(b.dataset.accountPage)));
 $('menuLogoutBtn').onclick=logout;
 $('accountLanguage').addEventListener('change',e=>setLanguage(e.target.value));
