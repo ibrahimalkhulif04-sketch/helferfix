@@ -136,8 +136,8 @@ CREATE INDEX IF NOT EXISTS idx_ratings_from_user ON ratings(from_user_id,created
 async function resolveGermanPlz(plz) {
  const code=String(plz||'').trim(); if(!/^\d{5}$/.test(code)) return null;
  const cached=db.prepare('SELECT plz,locality,state,lat,lon FROM plz_cache WHERE plz=?').get(code); if(cached)return cached;
- const response=await fetch('https://openplzapi.org/de/Localities?postalCode='+encodeURIComponent(code)+'&page=1&pageSize=20',{headers:{accept:'application/json'},signal:AbortSignal.timeout(7000)});
- if(!response.ok)throw new Error('PLZ service unavailable'); const rows=await response.json(); if(!Array.isArray(rows)||!rows.length)return null;
+ let response;try{response=await fetch('https://openplzapi.org/de/Localities?postalCode='+encodeURIComponent(code)+'&page=1&pageSize=20',{headers:{accept:'application/json'},signal:AbortSignal.timeout(7000)});}catch{return null;}
+ if(!response.ok)return null; const rows=await response.json(); if(!Array.isArray(rows)||!rows.length)return null;
  const row=rows[0],locality=String(row.name||row.locality||row.municipality?.name||'').trim(),state=String(row.federalState?.name||row.federalstate?.name||row.state||'').trim(); if(!locality||!state)return null;
  let lat=null,lon=null; try { const url='https://nominatim.openstreetmap.org/search?'+new URLSearchParams({postalcode:code,country:'Germany',format:'jsonv2',limit:'1'}); const geo=await fetch(url,{headers:{'User-Agent':'HelferFix/1.0 (postal-code lookup; support@helferfix.de)','Accept-Language':'de'},signal:AbortSignal.timeout(7000)}); if(geo.ok){const items=await geo.json();if(items[0]){lat=Number(items[0].lat);lon=Number(items[0].lon);if(!Number.isFinite(lat)||!Number.isFinite(lon)){lat=null;lon=null;}}}}catch{}
  db.prepare('INSERT OR REPLACE INTO plz_cache(plz,locality,state,lat,lon,updated_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)').run(code,locality,state,lat,lon); return {plz:code,locality,state,lat,lon};
@@ -663,8 +663,8 @@ app.post('/api/rides/:id/repost',requireRole('customer'),(req,res)=>{
 app.get('/api/rides/open',requireRole('driver'),async(req,res)=>{
  const rides=db.prepare("SELECT r.* FROM ride_requests r WHERE r.status='quoted' AND r.assigned_driver_id IS NULL AND EXISTS (SELECT 1 FROM users c WHERE c.id=r.customer_id AND c.active=1) ORDER BY r.id DESC").all();
  const area=db.prepare('SELECT base_plz,radius_km,states_json,postal_codes_json FROM provider_service_areas WHERE user_id=?').get(req.user.id);if(!area)return res.json({rides:rides.map(withDriverMoney)});
- const base=await resolveGermanPlz(area.base_plz);if(!base||base.lat==null||base.lon==null)return res.json({rides:[]});let states=[],codes=[];try{states=JSON.parse(area.states_json||'[]');}catch{}try{codes=JSON.parse(area.postal_codes_json||'[]');}catch{}
- const filtered=[];for(const ride of rides){if(!ride.pickup_plz)continue;const info=await resolveGermanPlz(ride.pickup_plz);if(!info)continue;const match=codes.includes(info.plz)||states.includes(info.state)||(info.lat!=null&&info.lon!=null&&distanceKm({lat:base.lat,lon:base.lon},{lat:info.lat,lon:info.lon})<=area.radius_km);if(match)filtered.push(ride);}res.json({rides:filtered.map(withDriverMoney)});
+ const base=await resolveGermanPlz(area.base_plz);let states=[],codes=[];try{states=JSON.parse(area.states_json||'[]');}catch{}try{codes=JSON.parse(area.postal_codes_json||'[]');}catch{}
+ const filtered=[];for(const ride of rides){if(!ride.pickup_plz)continue;const info=await resolveGermanPlz(ride.pickup_plz);if(!info)continue;const explicit=codes.includes(info.plz)||states.includes(info.state);const radius=!!base&&base.lat!=null&&base.lon!=null&&info.lat!=null&&info.lon!=null&&distanceKm({lat:base.lat,lon:base.lon},{lat:info.lat,lon:info.lon})<=area.radius_km;if(explicit||radius)filtered.push(ride);}res.json({rides:filtered.map(withDriverMoney)});
 });
 // Atomic conditional update: only one driver can claim a request.
 app.post('/api/rides/:id/accept',requireRole('driver'),(req,res)=>{
