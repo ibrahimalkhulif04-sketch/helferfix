@@ -1022,7 +1022,7 @@ app.get('/api/admin/rides',requireRole('admin'),(req,res)=>{
 });
 app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
  const id=Number(req.params.id),adminStatus=String(req.body?.status||'');
- const allowed=['new','reviewing','waiting_customer','waiting_driver','approved','in_progress','completed','rejected','closed'];
+ const allowed=['approved','rejected'];
  if(!Number.isInteger(id)||!allowed.includes(adminStatus))return res.status(400).json({error:'Ungültiger Status.'});
  const ride=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
  if(adminStatus==='approved'&&(!Number.isInteger(ride.price_cents)||ride.price_cents<100))return res.status(400).json({error:'Diese Anfrage hat keinen gültigen Kundenpreis und kann nicht freigegeben werden.'});
