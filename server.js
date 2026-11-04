@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS ride_requests (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  customer_id INTEGER NOT NULL REFERENCES users(id),
  service_type TEXT NOT NULL DEFAULT 'airport', pickup TEXT NOT NULL,
- destination TEXT NOT NULL, travel_date TEXT, travel_time TEXT,
+ destination TEXT NOT NULL, pickup_plz TEXT, pickup_state TEXT, pickup_lat REAL, pickup_lon REAL, destination_plz TEXT, travel_date TEXT, travel_time TEXT,
  passengers INTEGER NOT NULL DEFAULT 2, luggage INTEGER NOT NULL DEFAULT 2,
  vehicle_type TEXT NOT NULL DEFAULT 'PKW', notes TEXT,
  status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','quoted','accepted','cancelled','completed')),
@@ -87,6 +87,7 @@ if (!chatMessageColumns.includes('read_at')) db.exec('ALTER TABLE chat_messages 
 
 // Safe, additive migration: old accounts, requests and quote history remain in place.
 const rideColumns = db.prepare('PRAGMA table_info(ride_requests)').all().map(c => c.name);
+for (const [column, definition] of Object.entries({pickup_plz:'TEXT',pickup_state:'TEXT',pickup_lat:'REAL',pickup_lon:'REAL',destination_plz:'TEXT'})) if(!rideColumns.includes(column)) db.exec(`ALTER TABLE ride_requests ADD COLUMN ${column} ${definition}`);
 if (!rideColumns.includes('price_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN price_cents INTEGER');
 if (!rideColumns.includes('assigned_driver_id')) db.exec('ALTER TABLE ride_requests ADD COLUMN assigned_driver_id INTEGER REFERENCES users(id)');
 if (!rideColumns.includes('admin_approved_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_approved_at TEXT');
@@ -107,6 +108,7 @@ for (const [column, definition] of Object.entries({
 
 
 db.exec(`
+CREATE TABLE IF NOT EXISTS plz_cache (plz TEXT PRIMARY KEY, locality TEXT NOT NULL, state TEXT NOT NULL, lat REAL, lon REAL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS provider_service_areas (
  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
  base_plz TEXT NOT NULL,
@@ -130,6 +132,17 @@ CREATE INDEX IF NOT EXISTS idx_ratings_to_user ON ratings(to_user_id,created_at 
 CREATE INDEX IF NOT EXISTS idx_ratings_from_user ON ratings(from_user_id,created_at DESC);
 `);
 
+// Resolve German postal codes and cache locality/state plus postcode-centre coordinates.
+async function resolveGermanPlz(plz) {
+ const code=String(plz||'').trim(); if(!/^\d{5}$/.test(code)) return null;
+ const cached=db.prepare('SELECT plz,locality,state,lat,lon FROM plz_cache WHERE plz=?').get(code); if(cached)return cached;
+ const response=await fetch('https://openplzapi.org/de/Localities?postalCode='+encodeURIComponent(code)+'&page=1&pageSize=20',{headers:{accept:'application/json'},signal:AbortSignal.timeout(7000)});
+ if(!response.ok)throw new Error('PLZ service unavailable'); const rows=await response.json(); if(!Array.isArray(rows)||!rows.length)return null;
+ const row=rows[0],locality=String(row.name||row.locality||row.municipality?.name||'').trim(),state=String(row.federalState?.name||row.federalstate?.name||row.state||'').trim(); if(!locality||!state)return null;
+ let lat=null,lon=null; try { const url='https://nominatim.openstreetmap.org/search?'+new URLSearchParams({postalcode:code,country:'Germany',format:'jsonv2',limit:'1'}); const geo=await fetch(url,{headers:{'User-Agent':'HelferFix/1.0 (postal-code lookup; support@helferfix.de)','Accept-Language':'de'},signal:AbortSignal.timeout(7000)}); if(geo.ok){const items=await geo.json();if(items[0]){lat=Number(items[0].lat);lon=Number(items[0].lon);if(!Number.isFinite(lat)||!Number.isFinite(lon)){lat=null;lon=null;}}}}catch{}
+ db.prepare('INSERT OR REPLACE INTO plz_cache(plz,locality,state,lat,lon,updated_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)').run(code,locality,state,lat,lon); return {plz:code,locality,state,lat,lon};
+}
+function distanceKm(a,b){const rad=n=>n*Math.PI/180,dLat=rad(b.lat-a.lat),dLon=rad(b.lon-a.lon),x=Math.sin(dLat/2)**2+Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLon/2)**2;return 6371*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
 async function ensureAdmin() {
  const email = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
  const password = process.env.ADMIN_PASSWORD || '';
@@ -359,17 +372,19 @@ app.patch('/api/profile/phone',requireRole('customer','driver'),(req,res)=>{
  res.json({ok:true,phone});
 });
 
+app.get('/api/postal-codes/:plz',async(req,res)=>{try{const info=await resolveGermanPlz(req.params.plz);if(!info)return res.status(404).json({error:'PLZ nicht gefunden.'});res.json({postalCode:info.plz,city:info.locality,state:info.state});}catch{res.status(503).json({error:'PLZ-Prüfung momentan nicht verfügbar.'});}});
 app.get('/api/profile/service-area',requireRole('driver'),(req,res)=>{
  const row=db.prepare('SELECT base_plz,radius_km,states_json,postal_codes_json FROM provider_service_areas WHERE user_id=?').get(req.user.id);
  let states=[],postalCodes=[];try{states=JSON.parse(row?.states_json||'[]');}catch{}try{postalCodes=JSON.parse(row?.postal_codes_json||'[]');}catch{}
  res.json({serviceArea:row?{basePlz:row.base_plz,radiusKm:row.radius_km,states,postalCodes}:{basePlz:'',radiusKm:25,states:[],postalCodes:[]}});
 });
-app.patch('/api/profile/service-area',requireRole('driver'),(req,res)=>{
+app.patch('/api/profile/service-area',requireRole('driver'),async(req,res)=>{
  const basePlz=String(req.body?.basePlz||'').trim(),radiusKm=Number(req.body?.radiusKm);
  const allowedStates=['Baden-Württemberg','Bayern','Berlin','Brandenburg','Bremen','Hamburg','Hessen','Mecklenburg-Vorpommern','Niedersachsen','Nordrhein-Westfalen','Rheinland-Pfalz','Saarland','Sachsen','Sachsen-Anhalt','Schleswig-Holstein','Thüringen'];
  const states=Array.isArray(req.body?.states)?[...new Set(req.body.states.filter(x=>allowedStates.includes(x)))]:[];
  const postalCodes=Array.isArray(req.body?.postalCodes)?[...new Set(req.body.postalCodes.map(x=>String(x).trim()).filter(x=>/^\d{5}$/.test(x)))].slice(0,100):[];
  if(!/^\d{5}$/.test(basePlz)||![10,25,50,100].includes(radiusKm)||!Array.isArray(req.body?.states)||!Array.isArray(req.body?.postalCodes)||states.length!==req.body.states.length||req.body.postalCodes.some(x=>!/^\d{5}$/.test(String(x).trim())))return res.status(400).json({error:'Bitte gib eine gültige fünfstellige PLZ, einen Radius und gültige Gebiete an.'});
+ const baseInfo=await resolveGermanPlz(basePlz);if(!baseInfo)return res.status(400).json({error:'Basis-PLZ nicht gefunden.'});for(const code of postalCodes)if(!await resolveGermanPlz(code))return res.status(400).json({error:'PLZ '+code+' nicht gefunden.'});
  db.prepare(`INSERT INTO provider_service_areas(user_id,base_plz,radius_km,states_json,postal_codes_json) VALUES(?,?,?,?,?)
  ON CONFLICT(user_id) DO UPDATE SET base_plz=excluded.base_plz,radius_km=excluded.radius_km,states_json=excluded.states_json,postal_codes_json=excluded.postal_codes_json,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,basePlz,radiusKm,JSON.stringify(states),JSON.stringify(postalCodes));
  res.json({ok:true,serviceArea:{basePlz,radiusKm,states,postalCodes}});
@@ -508,10 +523,13 @@ app.post('/api/auth/login',async(req,res)=>{
 app.post('/api/auth/logout',(req,res)=>req.session.destroy(()=>{res.clearCookie('connect.sid');res.json({ok:true,message:'Abgemeldet.'});}));
 
 // Customer requests: service-specific details are saved; all requests wait for admin approval.
-app.post('/api/rides',requireRole('customer'),(req,res)=>{
+app.post('/api/rides',requireRole('customer'),async(req,res)=>{
  const serviceType=['airport','garden','moving','multi'].includes(req.body.serviceType)?req.body.serviceType:'airport';
  const pickup=clean(req.body.pickup,180) || (serviceType==='multi'?'—':'');
  const destination=clean(req.body.destination,180) || (serviceType==='garden'||serviceType==='multi'?pickup:'');
+ const pickupPlz=clean(req.body.pickupPlz,5),destinationPlz=clean(req.body.destinationPlz,5);
+ const pickupInfo=serviceType==='multi'?null:await resolveGermanPlz(pickupPlz);
+ const destinationInfo=(serviceType==='airport'||serviceType==='moving')?await resolveGermanPlz(destinationPlz):null;
  const serviceDescription=clean(req.body.serviceDescription,2000);
  const gardenHours=req.body.gardenHours===''||req.body.gardenHours==null?null:Number(req.body.gardenHours);
  const travelDate=clean(req.body.travelDate,10),travelTime=clean(req.body.travelTime,5);
@@ -533,7 +551,7 @@ app.post('/api/rides',requireRole('customer'),(req,res)=>{
  const childSeatsNeeded=Number(req.body.childSeatsNeeded||0);
  const childAgesHeights=clean(req.body.childAgesHeights,200);
  const childSeatProvider=['customer','driver','none'].includes(req.body.childSeatProvider)?req.body.childSeatProvider:'none';
- if((serviceType!=='multi'&&(!pickup||pickup.length<2))||((serviceType==='airport'||serviceType==='moving')&&(!destination||destination.length<2)))return res.status(400).json({error:'Bitte Start/Ort und – falls erforderlich – Ziel korrekt angeben.'});
+ if((serviceType!=='multi'&&(!pickup||pickup.length<2||!pickupInfo))||((serviceType==='airport'||serviceType==='moving')&&(!destination||destination.length<2||!destinationInfo)))return res.status(400).json({error:'Bitte gib gültige PLZ für Start und Ziel ein.'});
  if(!travelDate||!/^\d{4}-\d{2}-\d{2}$/.test(travelDate)||!travelTime||!/^([01]\d|2[0-3]):[0-5]\d$/.test(travelTime))return res.status(400).json({error:'Bitte Datum und Uhrzeit angeben.'});
  // Reject past dates/times using the local German time zone, regardless of the server's UTC clock.
  const berlinNow = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date()).replace(' ', 'T');
@@ -551,11 +569,11 @@ app.post('/api/rides',requireRole('customer'),(req,res)=>{
  if(travelDate&&!/^\d{4}-\d{2}-\d{2}$/.test(travelDate))return res.status(400).json({error:'Ungültiges Datum.'});
  const cents=Math.round(price*100),pct=feePercent(),commission=Math.round(cents*pct/100);
  const result=db.prepare(`INSERT INTO ride_requests (
- customer_id,service_type,pickup,destination,travel_date,travel_time,passengers,luggage,vehicle_type,notes,
+ customer_id,service_type,pickup,destination,pickup_plz,pickup_state,pickup_lat,pickup_lon,destination_plz,travel_date,travel_time,passengers,luggage,vehicle_type,notes,
  price_cents,commission_cents,driver_payout_cents,status,garden_task,garden_size_m2,moving_task,pickup_floor,destination_floor,
  pickup_elevator,destination_elevator,item_count,need_helpers,need_van,child_count,child_seats_needed,child_ages_heights,child_seat_provider,photos_json,service_description,garden_hours
- ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
- .run(req.user.id,serviceType,pickup,destination,travelDate,travelTime,
+ ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+ .run(req.user.id,serviceType,pickup,destination,pickupInfo?.plz||null,pickupInfo?.state||null,pickupInfo?.lat,pickupInfo?.lon,destinationInfo?.plz||null,travelDate,travelTime,
   serviceType==='airport'?passengers:0,serviceType==='airport'?luggage:0,serviceType==='airport'?vehicleType:'',notes||null,
   cents,commission,cents-commission,gardenTask,gardenSize,movingTask,pickupFloor||null,destinationFloor||null,
   pickupElevator,destinationElevator,itemCount,needHelpers,needVan,
@@ -640,9 +658,11 @@ app.post('/api/rides/:id/repost',requireRole('customer'),(req,res)=>{
  res.json({message:'Anfrage erneut eingereicht und wartet auf Admin-Freigabe.'});
 });
 // Drivers see only admin-approved requests. Price is fixed; there is no driver price-offer route.
-app.get('/api/rides/open',requireRole('driver'),(req,res)=>{
+app.get('/api/rides/open',requireRole('driver'),async(req,res)=>{
  const rides=db.prepare("SELECT r.* FROM ride_requests r WHERE r.status='quoted' AND r.assigned_driver_id IS NULL AND EXISTS (SELECT 1 FROM users c WHERE c.id=r.customer_id AND c.active=1) ORDER BY r.id DESC").all();
- res.json({rides:rides.map(withDriverMoney)});
+ const area=db.prepare('SELECT base_plz,radius_km,states_json,postal_codes_json FROM provider_service_areas WHERE user_id=?').get(req.user.id);if(!area)return res.json({rides:rides.map(withDriverMoney)});
+ const base=await resolveGermanPlz(area.base_plz);if(!base||base.lat==null||base.lon==null)return res.json({rides:[]});let states=[],codes=[];try{states=JSON.parse(area.states_json||'[]');}catch{}try{codes=JSON.parse(area.postal_codes_json||'[]');}catch{}
+ const filtered=[];for(const ride of rides){if(!ride.pickup_plz)continue;const info=await resolveGermanPlz(ride.pickup_plz);if(!info)continue;const match=codes.includes(info.plz)||states.includes(info.state)||(info.lat!=null&&info.lon!=null&&distanceKm({lat:base.lat,lon:base.lon},{lat:info.lat,lon:info.lon})<=area.radius_km);if(match)filtered.push(ride);}res.json({rides:filtered.map(withDriverMoney)});
 });
 // Atomic conditional update: only one driver can claim a request.
 app.post('/api/rides/:id/accept',requireRole('driver'),(req,res)=>{
