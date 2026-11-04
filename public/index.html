@@ -181,6 +181,7 @@ async function searchLocation(side,query){
  if(query.trim().length<2)return;
  try{
   const data=await api('/api/postal-codes/search?q='+encodeURIComponent(query.trim()));
+  if($(side==='pickup'?'pickupSearch':'destinationSearch').value.trim()!==query.trim())return;
   const unique=new Map();
   for(const item of data.results||[])unique.set(item.postalCode+'|'+item.city,item);
   const items=[...unique.values()];
