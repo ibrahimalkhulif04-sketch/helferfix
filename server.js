@@ -719,6 +719,7 @@ app.get('/api/rides/:id/edit',requireRole('customer'),(req,res)=>{
  res.json({ride:withCustomerMoney(ride)});
 });
 app.patch('/api/rides/:id',requireRole('customer'),async(req,res)=>{
+ const ban=db.prepare('SELECT ban_until FROM users WHERE id=?').get(req.user.id);if(ban?.ban_until&&Date.parse(String(ban.ban_until).replace(' ','T')+'Z')>Date.now())return res.status(403).json({error:'Dein Konto ist bis '+ban.ban_until+' für neue Anfragen gesperrt.'});
  const id=Number(req.params.id),b=req.body||{};
  console.info('[ride-edit] handler entered',JSON.stringify({pid:process.pid,dbFile:path.resolve(dataDir,'helferfix.sqlite'),rideId:id,userId:req.user.id,bodyKeys:Object.keys(b).sort(),serviceType:typeof b.serviceType==='string'?b.serviceType:'',travelDate:typeof b.travelDate==='string'?b.travelDate:'',travelTime:typeof b.travelTime==='string'?b.travelTime:'',priceEuro:typeof b.priceEuro==='number'||typeof b.priceEuro==='string'?String(b.priceEuro).slice(0,20):typeof b.priceEuro}));
  const old=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
@@ -774,6 +775,7 @@ app.get('/api/rides/mine',requireRole('customer'),(req,res)=>{
  res.json({rides:rides.map(withCustomerMoney)});
 });
 app.post('/api/rides/:id/repost',requireRole('customer'),(req,res)=>{
+ const ban=db.prepare('SELECT ban_until FROM users WHERE id=?').get(req.user.id);if(ban?.ban_until&&Date.parse(String(ban.ban_until).replace(' ','T')+'Z')>Date.now())return res.status(403).json({error:'Dein Konto ist bis '+ban.ban_until+' für neue Anfragen gesperrt.'});
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
  const ride=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
  if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
