@@ -595,7 +595,7 @@ app.get('/api/rides/:id/edit',requireRole('customer'),(req,res)=>{
  if(!['new','quoted'].includes(ride.status)||ride.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Änderung nur über den Support möglich.'});
  res.json({ride:withCustomerMoney(ride)});
 });
-app.patch('/api/rides/:id',requireRole('customer'),(req,res)=>{
+app.patch('/api/rides/:id',requireRole('customer'),async(req,res)=>{
  const id=Number(req.params.id),b=req.body||{};
  console.info('[ride-edit] handler entered',JSON.stringify({pid:process.pid,dbFile:path.resolve(dataDir,'helferfix.sqlite'),rideId:id,userId:req.user.id,bodyKeys:Object.keys(b).sort(),serviceType:typeof b.serviceType==='string'?b.serviceType:'',travelDate:typeof b.travelDate==='string'?b.travelDate:'',travelTime:typeof b.travelTime==='string'?b.travelTime:'',priceEuro:typeof b.priceEuro==='number'||typeof b.priceEuro==='string'?String(b.priceEuro).slice(0,20):typeof b.priceEuro}));
  const old=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
