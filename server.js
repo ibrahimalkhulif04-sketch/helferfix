@@ -391,7 +391,7 @@ async function searchGermanLocalities(query) {
  const params=new URLSearchParams();
  if(/^\d+$/.test(q))params.set('postalCode',q.length===5?q:'^'+q);
  else {
-  const safe=q.replace(/[^A-Za-zÄÖÜäöüß0-9 .'-]/g,'').trim();
+  const safe=q.replace(/[^A-Za-zÄÖÜäöüß0-9 '-]/g,'').trim();
   if(safe.length<2)return [];
   params.set('name','^'+safe);
  }
