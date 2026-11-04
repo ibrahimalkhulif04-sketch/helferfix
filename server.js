@@ -92,7 +92,6 @@ if (!chatMessageColumns.includes('read_at')) db.exec('ALTER TABLE chat_messages 
 // Safe, additive migration: old accounts, requests and quote history remain in place.
 const rideColumns = db.prepare('PRAGMA table_info(ride_requests)').all().map(c => c.name);
 for (const [column, definition] of Object.entries({pickup_plz:'TEXT',pickup_state:'TEXT',pickup_lat:'REAL',pickup_lon:'REAL',destination_plz:'TEXT'})) if(!rideColumns.includes(column)) db.exec(`ALTER TABLE ride_requests ADD COLUMN ${column} ${definition}`);
-if (!rideColumns.includes('city')) db.exec('ALTER TABLE ride_requests ADD COLUMN city TEXT');
 if (!rideColumns.includes('price_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN price_cents INTEGER');
 if (!rideColumns.includes('assigned_driver_id')) db.exec('ALTER TABLE ride_requests ADD COLUMN assigned_driver_id INTEGER REFERENCES users(id)');
 if (!rideColumns.includes('admin_approved_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_approved_at TEXT');
