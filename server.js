@@ -373,40 +373,54 @@ app.patch('/api/profile/phone',requireRole('customer','driver'),(req,res)=>{
 });
 
 
-// Search OpenPLZ localities by postal code or locality name. Exact city+PLZ pairs
-// are verified upstream; the legacy PLZ-only cache is never used for validation.
+// Search OpenPLZ localities by postal code or locality name.
+async function fetchOpenPlzLocalities(params) {
+ const all=[];
+ for(let page=1;page<=10;page++){
+  params.set('page',String(page));params.set('pageSize','50');
+  const response=await fetch('https://openplzapi.org/de/Localities?'+params.toString(),{headers:{accept:'application/json'},signal:AbortSignal.timeout(7000)});
+  if(!response.ok)throw new Error('OpenPLZ lookup failed');
+  const rows=await response.json();if(!Array.isArray(rows)||!rows.length)break;
+  all.push(...rows);if(rows.length<50)break;
+ }
+ return all;
+}
 async function searchGermanLocalities(query) {
  const q=String(query||'').trim();
- if(q.length<2||q.length>80) return [];
- const digits=/^\d+$/.test(q);
- const escaped=q.replace(/[\\^$.*+?()[\]{}|]/g,'\\app.get('/api/postal-codes/search',async(req,res)=>{
+ if(q.length<2||q.length>80)return [];
+ const params=new URLSearchParams();
+ if(/^\d+$/.test(q))params.set('postalCode',q.length===5?q:'^'+q);
+ else {
+  const safe=q.replace(/[^A-Za-zÄÖÜäöüß0-9 .'-]/g,'').trim();
+  if(safe.length<2)return [];
+  params.set('name','^'+safe);
+ }
+ const rows=await fetchOpenPlzLocalities(params),unique=new Map();
+ for(const row of rows){
+  const postalCode=String(row.postalcode||row.postalCode||'').trim();
+  const city=String(row.name||'').trim(),state=String(row.federalState?.name||'').trim();
+  if(!/^\d{5}$/.test(postalCode)||!city||!state)continue;
+  unique.set(postalCode+'|'+city.toLocaleLowerCase('de'),{postalCode,city,state});
+ }
+ return [...unique.values()].slice(0,250);
+}
+async function resolveSelectedLocality(plz,city) {
+ const code=String(plz||'').trim(),name=String(city||'').trim();
+ if(!/^\d{5}$/.test(code)||!name||name.length>180)return null;
+ const rows=await fetchOpenPlzLocalities(new URLSearchParams({postalCode:code}));
+ const row=rows.find(item=>String(item.postalcode||item.postalCode||'').trim()===code&&String(item.name||'').trim().toLocaleLowerCase('de')===name.toLocaleLowerCase('de'));
+ if(!row)return null;
+ let geo=null;try{geo=await resolveGermanPlz(code);}catch{}
+ return {plz:code,locality:String(row.name).trim(),state:String(row.federalState?.name||geo?.state||'').trim(),lat:geo?.lat??null,lon:geo?.lon??null};
+}
+app.get('/api/postal-codes/search',async(req,res)=>{
  try{res.json({results:await searchGermanLocalities(req.query.q)});}
  catch(error){console.error('[postal-search] lookup failed:',error.message);res.status(503).json({error:'Die Orts- und PLZ-Suche ist momentan nicht verfügbar.'});}
 });
-app.get('/api/postal-codes/:plz',async(req,res)=>');
- const params=new URLSearchParams({page:'1',pageSize:'50'});
- if(digits) params.set('postalCode',q.length===5?q:'^'+escaped);
- else params.set('name','^'+escaped);
- const response=await fetch('https://openplzapi.org/de/Localities?'+params.toString(),{headers:{accept:'application/json'},signal:AbortSignal.timeout(7000)});
- if(!response.ok) throw new Error('OpenPLZ lookup failed');
- const rows=await response.json();
- if(!Array.isArray(rows)) return [];
- const unique=new Map();
- for(const row of rows){
-  const postalCode=String(row.postalCode||row.postalcode||'').trim();
-  const locality=String(row.name||'').trim();
-  const state=String(row.federalState?.name||'').trim();
-  if(!/^\d{5}$/.test(postalCode)||!locality||!state) continue;
-  const key=postalCode+'|'+locality.toLocaleLowerCase('de');
-  if(!unique.has(key)) unique.set(key,{postalCode,city:locality,state});
- }
- return [...unique.values()].slice(0,50);
-}
-async function resolveSelectedLocality(plz, city) {
- const code=String(plz||'').trim(), name=String(city||'').trim();
- if(!/^\d{5}$/.test(code)||!name||name.length>180) return null;
- const escaped=name.replace(/[\\^$.*+?()[\]{}|]/g,'\\app.get('/api/postal-codes/:plz',async(req,res)=>');
- const params=new URLSearchParams({postalCode:code,name:'^'+escaped+'{try{const info=await resolveGermanPlz(req.params.plz);if(!info)return res.status(404).json({error:'PLZ nicht gefunden.'});res.json({postalCode:info.plz,city:info.locality,state:info.state});}catch{res.status(503).json({error:'PLZ-Prüfung momentan nicht verfügbar.'});}});
+app.get('/api/postal-codes/:plz',async(req,res)=>{
+ try{const info=await resolveGermanPlz(req.params.plz);if(!info)return res.status(404).json({error:'PLZ nicht gefunden.'});res.json({postalCode:info.plz,city:info.locality,state:info.state});}
+ catch{res.status(503).json({error:'PLZ-Prüfung momentan nicht verfügbar.'});}
+});
 app.get('/api/profile/service-area',requireRole('driver'),(req,res)=>{
  const row=db.prepare('SELECT base_plz,radius_km,states_json,postal_codes_json FROM provider_service_areas WHERE user_id=?').get(req.user.id);
  let states=[],postalCodes=[];try{states=JSON.parse(row?.states_json||'[]');}catch{}try{postalCodes=JSON.parse(row?.postal_codes_json||'[]');}catch{}
