@@ -373,7 +373,15 @@ app.patch('/api/profile/phone',requireRole('customer','driver'),(req,res)=>{
 });
 
 
-// Search OpenPLZ localities by postal code or locality name.
+// Germany-wide locality search: OpenPLZ municipalities plus Photon/OSM districts and suburbs.
+const localitySearchCache = new Map();
+const localityChoiceCache = new Map();
+const LOCALITY_CACHE_TTL = 10 * 60 * 1000;
+function rememberLocalityChoice(item) {
+ const key=item.postalCode+'|'+item.city.toLocaleLowerCase('de');
+ localityChoiceCache.set(key,{item,expires:Date.now()+LOCALITY_CACHE_TTL});
+ if(localityChoiceCache.size>5000){for(const [k,v] of localityChoiceCache)if(v.expires<Date.now())localityChoiceCache.delete(k);while(localityChoiceCache.size>4000)localityChoiceCache.delete(localityChoiceCache.keys().next().value);}
+}
 async function fetchOpenPlzLocalities(params) {
  const all=[];
  for(let page=1;page<=10;page++){
@@ -385,58 +393,72 @@ async function fetchOpenPlzLocalities(params) {
  }
  return all;
 }
-// Pilot locality aliases for Merseburg (PLZ 06217). Names are official/local district names.
-const MERSEBURG_ORTSTEILE_06217 = [
- {postalCode:'06217',city:'Merseburg',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Atzendorf',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Beuna',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Blösien',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Geusa',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Kötzschen',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Meuschau',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Neumarkt',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Trebnitz',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Venenien',state:'Sachsen-Anhalt'},
- {postalCode:'06217',city:'Zscherben',state:'Sachsen-Anhalt'}
-];
+async function fetchPhotonLocalities(query) {
+ const params=new URLSearchParams({q:query,countrycode:'DE',lang:'de',limit:'30'});
+ for(const layer of ['city','district','locality'])params.append('layer',layer);
+ const response=await fetch('https://photon.komoot.io/api/?'+params.toString(),{headers:{accept:'application/geo+json'},signal:AbortSignal.timeout(8000)});
+ if(!response.ok)throw new Error('Photon lookup failed');
+ const data=await response.json();
+ return (data.features||[]).map(feature=>{
+  const p=feature.properties||{},coords=feature.geometry?.coordinates||[];
+  const postalCode=String(p.postcode||'').trim(),name=String(p.name||'').trim();
+  const parent=String(p.city||'').trim(),district=String(p.district||'').trim();
+  if(!/^\d{5}$/.test(postalCode)||!name)return null;
+  const suburb=district&&district.toLocaleLowerCase('de')!==name.toLocaleLowerCase('de')?district:(String(p.osm_value||'').toLowerCase()==='district'?name:'');
+  const city=suburb&&parent?suburb+', '+parent:name;
+  const state=String(p.state||'').trim();
+  const lat=Number(coords[1]),lon=Number(coords[0]);
+  return {postalCode,city,state:state||'Deutschland',label:city,lat:Number.isFinite(lat)?lat:null,lon:Number.isFinite(lon)?lon:null,source:'photon'};
+ }).filter(Boolean);
+}
 async function searchGermanLocalities(query) {
- const q=String(query||'').trim();
- if(q.length<2||q.length>80)return [];
- const params=new URLSearchParams();
- if(/^\\d+$/.test(q))params.set('postalCode',q.length===5?q:'^'+q);
- else {
-  const safe=q.replace(/[^A-Za-zÄÖÜäöüß0-9 '-]/g,'').trim();
-  if(safe.length<2)return [];
-  params.set('name','^'+safe);
- }
- const rows=await fetchOpenPlzLocalities(params),unique=new Map();
- for(const row of rows){
-  const postalCode=String(row.postalcode||row.postalCode||'').trim();
-  const city=String(row.name||'').trim(),state=String(row.federalState?.name||'').trim();
-  if(!/^\\d{5}$/.test(postalCode)||!city||!state)continue;
-  unique.set(postalCode+'|'+city.toLocaleLowerCase('de'),{postalCode,city,state});
- }
- const normalized=q.toLocaleLowerCase('de');
- const pilotMatches=MERSEBURG_ORTSTEILE_06217.filter(item=>
-  /^\\d+$/.test(q)
-   ? item.postalCode.startsWith(q)
-   : item.city.toLocaleLowerCase('de').startsWith(normalized) || normalized==='merseburg'
- );
- for(const item of pilotMatches)unique.set(item.postalCode+'|'+item.city.toLocaleLowerCase('de'),item);
- return [...unique.values()].slice(0,250);
+ const q=String(query||'').trim();if(q.length<2||q.length>80)return [];
+ const cacheKey=q.toLocaleLowerCase('de'),cached=localitySearchCache.get(cacheKey);
+ if(cached&&cached.expires>Date.now())return cached.results;
+ const unique=new Map();
+ const add=item=>{
+  if(!/^\d{5}$/.test(item.postalCode)||!item.city||!item.state)return;
+  const key=item.postalCode+'|'+item.city.toLocaleLowerCase('de');
+  if(!unique.has(key))unique.set(key,item);
+  rememberLocalityChoice(unique.get(key));
+ };
+ const tasks=[],openParams=new URLSearchParams();
+ if(/^\d+$/.test(q))openParams.set('postalCode',q.length===5?q:'^'+q);
+ else {const safe=q.replace(/[^A-Za-zÄÖÜäöüß0-9 '-]/g,'').trim();if(safe.length>=2)openParams.set('name','^'+safe);}
+ if(openParams.size)tasks.push(fetchOpenPlzLocalities(openParams).then(rows=>rows.forEach(row=>add({postalCode:String(row.postalcode||row.postalCode||'').trim(),city:String(row.name||'').trim(),state:String(row.federalState?.name||'').trim(),label:String(row.name||'').trim(),source:'openplz'}))));
+ tasks.push(fetchPhotonLocalities(q).then(rows=>rows.forEach(add)));
+ const settled=await Promise.allSettled(tasks);
+ if(!unique.size&&settled.every(x=>x.status==='rejected'))throw new Error('Locality providers unavailable');
+ const results=[...unique.values()].slice(0,80);
+ localitySearchCache.set(cacheKey,{results,expires:Date.now()+2*60*1000});
+ if(localitySearchCache.size>500)localitySearchCache.delete(localitySearchCache.keys().next().value);
+ return results;
 }
 async function resolveSelectedLocality(plz,city) {
  const code=String(plz||'').trim(),name=String(city||'').trim();
- if(!/^\\d{5}$/.test(code)||!name||name.length>180)return null;
- const pilot=MERSEBURG_ORTSTEILE_06217.find(item=>item.postalCode===code&&item.city.toLocaleLowerCase('de')===name.toLocaleLowerCase('de'));
- if(pilot)return {plz:code,locality:pilot.city,state:pilot.state,lat:null,lon:null};
- const rows=await fetchOpenPlzLocalities(new URLSearchParams({postalCode:code}));
+ if(!/^\d{5}$/.test(code)||!name||name.length>180)return null;
+ const key=code+'|'+name.toLocaleLowerCase('de'),cached=localityChoiceCache.get(key);
+ if(cached&&cached.expires>Date.now())return {plz:code,locality:name,state:cached.item.state,lat:cached.item.lat??null,lon:cached.item.lon??null};
+ const rows=await fetchOpenPlzLocalities(new URLSearchParams({postalCode:code})).catch(()=>[]);
  const row=rows.find(item=>String(item.postalcode||item.postalCode||'').trim()===code&&String(item.name||'').trim().toLocaleLowerCase('de')===name.toLocaleLowerCase('de'));
- if(!row)return null;
- let geo=null;try{geo=await resolveGermanPlz(code);}catch{}
- return {plz:code,locality:String(row.name).trim(),state:String(row.federalState?.name||geo?.state||'').trim(),lat:geo?.lat??null,lon:geo?.lon??null};
+ if(row){let geo=null;try{geo=await resolveGermanPlz(code);}catch{}return {plz:code,locality:String(row.name).trim(),state:String(row.federalState?.name||geo?.state||'').trim(),lat:geo?.lat??null,lon:geo?.lon??null};}
+ const params=new URLSearchParams({q:name+' '+code,countrycode:'DE',lang:'de',limit:'15'});
+ try{
+  const response=await fetch('https://photon.komoot.io/api/?'+params.toString(),{headers:{accept:'application/geo+json'},signal:AbortSignal.timeout(8000)});
+  if(response.ok){
+   const data=await response.json();
+   const feature=(data.features||[]).find(f=>String(f.properties?.postcode||'').trim()===code);
+   if(feature){
+    const p=feature.properties||{},coords=feature.geometry?.coordinates||[];
+    const found=String(p.name||'').trim(),parent=String(p.city||'').trim(),district=String(p.district||'').trim();
+    const display=district&&parent?district+', '+parent:found;
+    if(display.toLocaleLowerCase('de')===name.toLocaleLowerCase('de')||found.toLocaleLowerCase('de')===name.toLocaleLowerCase('de'))return {plz:code,locality:name,state:String(p.state||'').trim(),lat:Number.isFinite(Number(coords[1]))?Number(coords[1]):null,lon:Number.isFinite(Number(coords[0]))?Number(coords[0]):null};
+   }
+  }
+ }catch{}
+ return null;
 }
-app.get('/api/postal-codes/search',async(req,res)=>{
+app.get('/api/postal-codes/search',rateLimit({windowMs:60*1000,limit:90,standardHeaders:'draft-7',legacyHeaders:false}),async(req,res)=>{
  try{res.json({results:await searchGermanLocalities(req.query.q)});}
  catch(error){console.error('[postal-search] lookup failed:',error.message);res.status(503).json({error:'Die Orts- und PLZ-Suche ist momentan nicht verfügbar.'});}
 });
