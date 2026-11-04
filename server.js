@@ -108,7 +108,8 @@ if (!rideColumns.includes('dispute_status')) db.exec("ALTER TABLE ride_requests 
 if (!rideColumns.includes('dispute_updated_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN dispute_updated_at TEXT');
 if (!rideColumns.includes('admin_resolution_note')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_resolution_note TEXT');
 if (!rideColumns.includes('dispute_driver_id')) db.exec('ALTER TABLE ride_requests ADD COLUMN dispute_driver_id INTEGER REFERENCES users(id)');
-if (!rideColumns.includes('admin_status')) db.exec("ALTER TABLE ride_requests ADD COLUMN admin_status TEXT NOT NULL DEFAULT 'new'");
+if (!rideColumns.includes('admin_status')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_status TEXT');
+db.exec("UPDATE ride_requests SET admin_status=NULL WHERE admin_status='new' AND status<>'new'");
 const notificationColumns = db.prepare('PRAGMA table_info(app_notifications)').all().map(c => c.name);
 if (!notificationColumns.includes('admin_message_id')) db.exec('ALTER TABLE app_notifications ADD COLUMN admin_message_id INTEGER REFERENCES admin_chat_messages(id) ON DELETE CASCADE');
 if (!rideColumns.includes('commission_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN commission_cents INTEGER');
@@ -926,7 +927,7 @@ app.get('/api/notifications/unread',requireRole('customer','driver','admin'),(re
 });
 app.post('/api/notifications/read',requireRole('customer','driver','admin'),(req,res)=>{
  const ids=Array.isArray(req.body.ids)?req.body.ids.slice(0,100):[];
- for(const raw of ids){const value=String(raw);const match=value.match(/^([nca])-(\\d+)$/);if(!match)continue;const id=Number(match[2]);if(match[1]==='n')db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else if(match[1]==='c')db.prepare('UPDATE chat_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=? AND admin_message_id IS NOT NULL').run(req.user.id,id);}
+ for(const raw of ids){const value=String(raw);const match=value.match(/^([nca])-(\d+)$/);if(!match)continue;const id=Number(match[2]);if(match[1]==='n')db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else if(match[1]==='c')db.prepare('UPDATE chat_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=? AND admin_message_id IS NOT NULL').run(req.user.id,id);}
  res.json({ok:true});
 });
 
@@ -1026,7 +1027,7 @@ app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
  else if(adminStatus==='new')operationalStatus='new';
  else if(adminStatus==='completed')operationalStatus='completed';
  else if(adminStatus==='rejected'||adminStatus==='closed')operationalStatus='cancelled';
- const clearAssignment=['new','completed','rejected','closed'].includes(adminStatus);
+ const clearAssignment=['new','approved','completed','rejected','closed'].includes(adminStatus);
  const approvedAt=adminStatus==='approved'?(ride.admin_approved_at||new Date().toISOString()):ride.admin_approved_at;
  const changed=db.prepare('UPDATE ride_requests SET admin_status=?,status=?,admin_approved_at=?,assigned_driver_id=CASE WHEN ?=1 THEN NULL ELSE assigned_driver_id END,accepted_at=CASE WHEN ?=1 THEN NULL ELSE accepted_at END WHERE id=?').run(adminStatus,operationalStatus,approvedAt,clearAssignment?1:0,clearAssignment?1:0,id);
  if(!changed.changes)return res.status(409).json({error:'Der Auftrag konnte nicht aktualisiert werden.'});
@@ -1035,7 +1036,6 @@ app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
  if(adminStatus==='approved'&&ride.status!=='quoted')notifyDriversOfNewRide(updated,req.user.id);
  if(ride.admin_status!==adminStatus||ride.status!==operationalStatus){
   notifyRideStatus(updated,adminStatus,req.user.id,ride.assigned_driver_id);
-  if(ride.assigned_driver_id&&Number(ride.assigned_driver_id)!==Number(ride.customer_id))addUserNotification(ride.assigned_driver_id,id,'status',adminStatus,null,req.user.id);
  }
  res.json({ok:true,status:adminStatus,message:'Status updated.'});
 });
