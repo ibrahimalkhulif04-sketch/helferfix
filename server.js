@@ -92,6 +92,13 @@ if (!rideColumns.includes('price_cents')) db.exec('ALTER TABLE ride_requests ADD
 if (!rideColumns.includes('assigned_driver_id')) db.exec('ALTER TABLE ride_requests ADD COLUMN assigned_driver_id INTEGER REFERENCES users(id)');
 if (!rideColumns.includes('admin_approved_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_approved_at TEXT');
 if (!rideColumns.includes('accepted_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN accepted_at TEXT');
+if (!rideColumns.includes('service_stage')) db.exec("ALTER TABLE ride_requests ADD COLUMN service_stage TEXT NOT NULL DEFAULT 'pending'");
+if (!rideColumns.includes('service_started_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_started_at TEXT');
+if (!rideColumns.includes('service_completed_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_completed_at TEXT');
+if (!rideColumns.includes('service_confirmed_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_confirmed_at TEXT');
+if (!rideColumns.includes('service_disputed_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_disputed_at TEXT');
+if (!rideColumns.includes('service_dispute_reason')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_dispute_reason TEXT');
+if (!rideColumns.includes('service_dispute_deadline_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_dispute_deadline_at TEXT');
 if (!rideColumns.includes('commission_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN commission_cents INTEGER');
 if (!rideColumns.includes('driver_payout_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN driver_payout_cents INTEGER');
 const existingRideColumns = new Set(rideColumns);
@@ -790,6 +797,34 @@ app.post('/api/rides/:id/cancel',requireRole('driver'),(req,res)=>{
  notifyRideStatus(before,'new',req.user.id);
  res.json({message:'Anfrage wurde zur erneuten Admin-Freigabe zurückgegeben.'});
 });
+
+app.post('/api/rides/:id/service-action',requireRole('customer','driver'),(req,res)=>{
+ const id=Number(req.params.id),action=String(req.body?.action||'');
+ if(!Number.isInteger(id)||id<1)return res.status(400).json({error:'Ungültige Anfrage.'});
+ if(!['start','finish','confirm','dispute'].includes(action))return res.status(400).json({error:'Ungültige Aktion.'});
+ const ride=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);
+ if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
+ if(ride.status!=='accepted'||!ride.assigned_driver_id)return res.status(409).json({error:'Der Auftrag ist nicht aktiv zugeordnet.'});
+ if(req.user.role==='driver'&&Number(ride.assigned_driver_id)!==Number(req.user.id))return res.status(403).json({error:'Keine Berechtigung.'});
+ if(req.user.role==='customer'&&Number(ride.customer_id)!==Number(req.user.id))return res.status(403).json({error:'Keine Berechtigung.'});
+ const stage=ride.service_stage||'pending';
+ const rules={start:{role:'driver',from:'pending',to:'started',column:'service_started_at',status:'service_started'},finish:{role:'driver',from:'started',to:'awaiting_customer',column:'service_completed_at',status:'service_completed'},confirm:{role:'customer',from:'awaiting_customer',to:'confirmed',column:'service_confirmed_at',status:'service_confirmed'},dispute:{role:'customer',from:'awaiting_customer',to:'disputed',column:'service_disputed_at',status:'service_disputed'}};
+ const rule=rules[action];
+ if(req.user.role!==rule.role)return res.status(403).json({error:'Keine Berechtigung für diese Aktion.'});
+ if(stage!==rule.from)return res.status(409).json({error:'Dieser Schritt ist bereits erledigt oder derzeit nicht möglich.'});
+ const tx=db.transaction(()=>{
+  const deadline=action==='finish'?", service_dispute_deadline_at=datetime('now','+48 hours')":'';
+  const result=db.prepare("UPDATE ride_requests SET service_stage=?, "+rule.column+"=CURRENT_TIMESTAMP"+deadline+" WHERE id=? AND status='accepted' AND service_stage=?").run(rule.to,id,stage);
+  if(!result.changes)return false;
+  db.prepare('INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,?,?,?,?)').run(id,req.user.id,req.user.role,'service_'+action,ride.status,ride.status,JSON.stringify({from:stage,to:rule.to}));
+  return true;
+ });
+ if(!tx())return res.status(409).json({error:'Der Auftragsstatus wurde inzwischen geändert. Bitte aktualisiere die Seite.'});
+ const updated=db.prepare('SELECT id,customer_id,assigned_driver_id,service_stage,service_started_at,service_completed_at,service_confirmed_at,service_disputed_at,service_dispute_deadline_at FROM ride_requests WHERE id=?').get(id);
+ notifyRideStatus(ride,rule.status,req.user.id,req.user.role==='customer'?ride.assigned_driver_id:ride.customer_id);
+ res.json({message:'Status aktualisiert.',service:updated});
+});
+
 app.get('/api/rides/assigned',requireRole('driver'),(req,res)=>{
  const rides=db.prepare("SELECT r.*,u.name AS customer_name FROM ride_requests r JOIN users u ON u.id=r.customer_id WHERE r.assigned_driver_id=? AND r.status='accepted' ORDER BY r.id DESC").all(req.user.id);
  res.json({rides:rides.map(withDriverMoney)});
