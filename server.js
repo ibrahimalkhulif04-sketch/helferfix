@@ -108,6 +108,9 @@ if (!rideColumns.includes('dispute_status')) db.exec("ALTER TABLE ride_requests 
 if (!rideColumns.includes('dispute_updated_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN dispute_updated_at TEXT');
 if (!rideColumns.includes('admin_resolution_note')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_resolution_note TEXT');
 if (!rideColumns.includes('dispute_driver_id')) db.exec('ALTER TABLE ride_requests ADD COLUMN dispute_driver_id INTEGER REFERENCES users(id)');
+if (!rideColumns.includes('admin_status')) db.exec("ALTER TABLE ride_requests ADD COLUMN admin_status TEXT NOT NULL DEFAULT 'new'");
+const notificationColumns = db.prepare('PRAGMA table_info(app_notifications)').all().map(c => c.name);
+if (!notificationColumns.includes('admin_message_id')) db.exec('ALTER TABLE app_notifications ADD COLUMN admin_message_id INTEGER REFERENCES admin_chat_messages(id) ON DELETE CASCADE');
 if (!rideColumns.includes('commission_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN commission_cents INTEGER');
 if (!rideColumns.includes('driver_payout_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN driver_payout_cents INTEGER');
 const existingRideColumns = new Set(rideColumns);
@@ -916,46 +919,58 @@ app.post('/api/push/delivered',requireRole('customer','driver'),(req,res)=>{
 app.get('/api/notifications/unread',requireRole('customer','driver','admin'),(req,res)=>{
  db.prepare(`UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP) WHERE sender_id<>? AND id IN (SELECT message_id FROM app_notifications WHERE recipient_id=? AND read_at IS NULL AND message_id IS NOT NULL)`).run(req.user.id,req.user.id);
  db.prepare(`UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP) WHERE sender_id<>? AND id IN (SELECT message_id FROM chat_notifications WHERE recipient_id=? AND read_at IS NULL)`).run(req.user.id,req.user.id);
- const current=db.prepare(`SELECT 'n-'||n.id AS id,n.id AS internal_id,n.ride_request_id,n.kind,n.status,n.message_id,n.created_at,m.message,u.name AS sender_name FROM app_notifications n LEFT JOIN chat_messages m ON m.id=n.message_id LEFT JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL`).all(req.user.id);
+ const current=db.prepare(`SELECT 'n-'||n.id AS id,n.id AS internal_id,n.ride_request_id,n.kind,n.status,n.message_id,n.created_at,m.message,u.name AS sender_name FROM app_notifications n LEFT JOIN chat_messages m ON m.id=n.message_id LEFT JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL AND n.admin_message_id IS NULL`).all(req.user.id);
  const legacy=db.prepare(`SELECT 'c-'||n.id AS id,n.id AS internal_id,n.ride_request_id,'message' AS kind,NULL AS status,n.message_id,n.created_at,m.message,u.name AS sender_name FROM chat_notifications n JOIN chat_messages m ON m.id=n.message_id JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL AND NOT EXISTS(SELECT 1 FROM app_notifications a WHERE a.message_id=n.message_id AND a.recipient_id=n.recipient_id)`).all(req.user.id);
- res.json({notifications:[...current,...legacy].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,50)});
+ const adminMessages=db.prepare(`SELECT 'a-'||n.id AS id,n.id AS internal_id,n.ride_request_id,'status' AS kind,'admin_message' AS status,NULL AS message_id,n.created_at,m.message,u.name AS sender_name,m.participant_user_id,u.role AS sender_role FROM app_notifications n JOIN admin_chat_messages m ON m.id=n.admin_message_id JOIN users u ON u.id=m.sender_user_id WHERE n.recipient_id=? AND n.read_at IS NULL`).all(req.user.id);
+ res.json({notifications:[...current,...legacy,...adminMessages].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,100)});
 });
 app.post('/api/notifications/read',requireRole('customer','driver','admin'),(req,res)=>{
  const ids=Array.isArray(req.body.ids)?req.body.ids.slice(0,100):[];
- for(const raw of ids){const value=String(raw);const match=value.match(/^([nc])-(\d+)$/);if(!match)continue;const id=Number(match[2]);if(match[1]==='n')db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else db.prepare('UPDATE chat_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);}
+ for(const raw of ids){const value=String(raw);const match=value.match(/^([nca])-(\\d+)$/);if(!match)continue;const id=Number(match[2]);if(match[1]==='n')db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else if(match[1]==='c')db.prepare('UPDATE chat_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=? AND admin_message_id IS NOT NULL').run(req.user.id,id);}
  res.json({ok:true});
 });
 
-// Separate administrator conversations: each participant can only see their own thread with the admin.
+// Separate administrator conversations. Closed threads remain readable only by admins.
 function adminChatParticipant(ride,user){return (user.role==='customer'&&Number(ride.customer_id)===Number(user.id))||(user.role==='driver'&&Number(ride.assigned_driver_id)===Number(user.id));}
+function adminChatClosed(ride){return ['resolved','rejected'].includes(String(ride.dispute_status||''));}
+function addAdminChatNotification(recipientId,rideId,messageId,actorId){
+ if(!recipientId||Number(recipientId)===Number(actorId))return;
+ const saved=db.prepare("INSERT INTO app_notifications(recipient_id,ride_request_id,kind,status,admin_message_id) VALUES(?,?,'status','admin_message',?)").run(recipientId,rideId,messageId);
+ sendPushToUser(recipientId,{kind:'status',status:'admin_message',rideId,notificationId:Number(saved.lastInsertRowid)}).catch(()=>{});
+}
 app.get('/api/admin/rides/:id/admin-chat/:participantId',requireRole('admin'),(req,res)=>{
- const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id FROM ride_requests WHERE id=?').get(id);
+ const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
  if(!ride||![ride.customer_id,ride.assigned_driver_id].map(Number).includes(participantId))return res.status(404).json({error:'Gespräch nicht gefunden.'});
  const participant=db.prepare('SELECT id,name,role FROM users WHERE id=?').get(participantId);
  const messages=db.prepare('SELECT m.id,m.sender_user_id,m.message,m.created_at,u.name AS sender_name FROM admin_chat_messages m JOIN users u ON u.id=m.sender_user_id WHERE m.ride_request_id=? AND m.participant_user_id=? ORDER BY m.id DESC LIMIT 200').all(id,participantId).reverse();
- res.json({participant,messages});
+ db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND ride_request_id=? AND admin_message_id IN (SELECT id FROM admin_chat_messages WHERE ride_request_id=? AND participant_user_id=? AND sender_user_id=?) AND read_at IS NULL').run(req.user.id,id,id,participantId,participantId);
+ res.json({participant,messages,closed:adminChatClosed(ride)});
 });
 app.post('/api/admin/rides/:id/admin-chat/:participantId',requireRole('admin'),(req,res)=>{
- const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id FROM ride_requests WHERE id=?').get(id);
+ const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
  if(!ride||![ride.customer_id,ride.assigned_driver_id].map(Number).includes(participantId))return res.status(404).json({error:'Gespräch nicht gefunden.'});
+ if(adminChatClosed(ride))return res.status(403).json({error:'Dieses Gespräch ist geschlossen. Neue Nachrichten sind nicht möglich.'});
  const message=typeof req.body?.message==='string'?req.body.message.trim():'';if(!message||message.length>2000)return res.status(400).json({error:'Bitte gib eine Nachricht mit 1 bis 2000 Zeichen ein.'});
- db.prepare('INSERT INTO admin_chat_messages(ride_request_id,participant_user_id,sender_user_id,message) VALUES(?,?,?,?)').run(id,participantId,req.user.id,message);
- addUserNotification(participantId,id,'status','admin_message',null,req.user.id);
+ const saved=db.prepare('INSERT INTO admin_chat_messages(ride_request_id,participant_user_id,sender_user_id,message) VALUES(?,?,?,?)').run(id,participantId,req.user.id,message);
+ addAdminChatNotification(participantId,id,Number(saved.lastInsertRowid),req.user.id);
  res.status(201).json({ok:true});
 });
 app.get('/api/rides/:id/admin-chat',requireRole('customer','driver'),(req,res)=>{
  const id=Number(req.params.id),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
  if(!ride||!adminChatParticipant(ride,req.user)||!ride.dispute_status||ride.dispute_status==='none')return res.status(403).json({error:'Dieses Admin-Gespräch ist nicht verfügbar.'});
+ if(adminChatClosed(ride))return res.status(403).json({error:'Dieses Gespräch wurde geschlossen.'});
  const messages=db.prepare('SELECT m.id,m.sender_user_id,m.message,m.created_at,u.name AS sender_name FROM admin_chat_messages m JOIN users u ON u.id=m.sender_user_id WHERE m.ride_request_id=? AND m.participant_user_id=? ORDER BY m.id DESC LIMIT 200').all(id,req.user.id).reverse();
- res.json({counterpartName:'HelferFix Admin',messages});
+ db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND ride_request_id=? AND admin_message_id IN (SELECT id FROM admin_chat_messages WHERE ride_request_id=? AND participant_user_id=? AND sender_user_id<>?) AND read_at IS NULL').run(req.user.id,id,id,req.user.id,req.user.id);
+ res.json({counterpartName:'HelferFix Admin',messages,closed:false});
 });
 app.post('/api/rides/:id/admin-chat',requireRole('customer','driver'),(req,res)=>{
  const id=Number(req.params.id),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
  if(!ride||!adminChatParticipant(ride,req.user)||!ride.dispute_status||ride.dispute_status==='none')return res.status(403).json({error:'Dieses Admin-Gespräch ist nicht verfügbar.'});
+ if(adminChatClosed(ride))return res.status(403).json({error:'Dieses Gespräch wurde geschlossen.'});
  const message=typeof req.body?.message==='string'?req.body.message.trim():'';if(!message||message.length>2000)return res.status(400).json({error:'Bitte gib eine Nachricht mit 1 bis 2000 Zeichen ein.'});
  const admin=db.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").get();if(!admin)return res.status(503).json({error:'Admin ist momentan nicht erreichbar.'});
- db.prepare('INSERT INTO admin_chat_messages(ride_request_id,participant_user_id,sender_user_id,message) VALUES(?,?,?,?)').run(id,req.user.id,req.user.id,message);
- addUserNotification(admin.id,id,'status','admin_message',null,req.user.id);
+ const saved=db.prepare('INSERT INTO admin_chat_messages(ride_request_id,participant_user_id,sender_user_id,message) VALUES(?,?,?,?)').run(id,req.user.id,req.user.id,message);
+ addAdminChatNotification(admin.id,id,Number(saved.lastInsertRowid),req.user.id);
  res.status(201).json({ok:true});
 });
 app.patch('/api/admin/rides/:id/dispute',requireRole('admin'),(req,res)=>{
@@ -1001,17 +1016,28 @@ app.get('/api/admin/rides',requireRole('admin'),(req,res)=>{
  res.json({rides:rides.map(withMoney)});
 });
 app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
- const id=Number(req.params.id),status=req.body.status;
- if(!Number.isInteger(id)||!['new','quoted','accepted','cancelled','completed'].includes(status))return res.status(400).json({error:'Ungültiger Status.'});
+ const id=Number(req.params.id),adminStatus=String(req.body?.status||'');
+ const allowed=['new','reviewing','waiting_customer','waiting_driver','approved','in_progress','completed','rejected','closed'];
+ if(!Number.isInteger(id)||!allowed.includes(adminStatus))return res.status(400).json({error:'Ungültiger Status.'});
  const ride=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
- if(status==='accepted')return res.status(400).json({error:'Der Status „Angenommen“ wird nur gesetzt, wenn ein Fahrer die Anfrage selbst annimmt.'});
- if(status==='quoted'&&(!Number.isInteger(ride.price_cents)||ride.price_cents<100))return res.status(400).json({error:'Diese alte Anfrage hat keinen festgelegten Kundenpreis. Bitte erstelle eine neue Anfrage.'});
- if(status==='quoted'&&ride.status==='accepted')return res.status(409).json({error:'Bitte lasse den Fahrer die Anfrage zuerst freigeben.'});
- const approvedAt=status==='quoted'?(ride.admin_approved_at||new Date().toISOString()):ride.admin_approved_at;
- db.prepare('UPDATE ride_requests SET status=?,admin_approved_at=?,assigned_driver_id=CASE WHEN ? IN (\'new\',\'cancelled\',\'completed\') THEN NULL ELSE assigned_driver_id END,accepted_at=CASE WHEN ? IN (\'new\',\'cancelled\',\'completed\') THEN NULL ELSE accepted_at END WHERE id=?').run(status,approvedAt,status,status,id);
- if(status==='quoted'&&ride.status!=='quoted'){const approvedRide=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);notifyDriversOfNewRide(approvedRide,req.user.id);}
- if(ride.status!==status&&status==='cancelled')db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status) VALUES(?,?,?,'admin_cancel',?,'cancelled')").run(id,req.user.id,'admin',ride.status);if(ride.status!==status)notifyRideStatus(ride,status,req.user.id,ride.assigned_driver_id);
- res.json({message:status==='quoted'?'Anfrage freigegeben und für Fahrer sichtbar.':status==='cancelled'?'Anfrage storniert.':status==='completed'?'Anfrage abgeschlossen.':'Status aktualisiert.'});
+ if(adminStatus==='approved'&&(!Number.isInteger(ride.price_cents)||ride.price_cents<100))return res.status(400).json({error:'Diese Anfrage hat keinen gültigen Kundenpreis und kann nicht freigegeben werden.'});
+ let operationalStatus=ride.status;
+ if(adminStatus==='approved')operationalStatus='quoted';
+ else if(adminStatus==='new')operationalStatus='new';
+ else if(adminStatus==='completed')operationalStatus='completed';
+ else if(adminStatus==='rejected'||adminStatus==='closed')operationalStatus='cancelled';
+ const clearAssignment=['new','completed','rejected','closed'].includes(adminStatus);
+ const approvedAt=adminStatus==='approved'?(ride.admin_approved_at||new Date().toISOString()):ride.admin_approved_at;
+ const changed=db.prepare('UPDATE ride_requests SET admin_status=?,status=?,admin_approved_at=?,assigned_driver_id=CASE WHEN ?=1 THEN NULL ELSE assigned_driver_id END,accepted_at=CASE WHEN ?=1 THEN NULL ELSE accepted_at END WHERE id=?').run(adminStatus,operationalStatus,approvedAt,clearAssignment?1:0,clearAssignment?1:0,id);
+ if(!changed.changes)return res.status(409).json({error:'Der Auftrag konnte nicht aktualisiert werden.'});
+ db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,'admin_status_change',?,?,?)").run(id,req.user.id,'admin',ride.admin_status||ride.status,adminStatus,JSON.stringify({operational_old:ride.status,operational_new:operationalStatus}));
+ const updated=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);
+ if(adminStatus==='approved'&&ride.status!=='quoted')notifyDriversOfNewRide(updated,req.user.id);
+ if(ride.admin_status!==adminStatus||ride.status!==operationalStatus){
+  notifyRideStatus(updated,adminStatus,req.user.id,ride.assigned_driver_id);
+  if(ride.assigned_driver_id&&Number(ride.assigned_driver_id)!==Number(ride.customer_id))addUserNotification(ride.assigned_driver_id,id,'status',adminStatus,null,req.user.id);
+ }
+ res.json({ok:true,status:adminStatus,message:'Status updated.'});
 });
 app.get('/api/support/contact',(req,res)=>{const row=db.prepare('SELECT value FROM settings WHERE key=?').get('support_email');res.json({email:row?.value||''});});
 app.get('/api/support/assistant/status',(req,res)=>res.json({enabled:!!OPENAI_API_KEY}));
