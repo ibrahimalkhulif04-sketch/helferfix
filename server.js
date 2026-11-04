@@ -787,7 +787,8 @@ app.post('/api/rides/:id/repost',requireRole('customer'),(req,res)=>{
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
  const ride=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
  if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
- if(!['cancelled'].includes(ride.status))return res.status(409).json({error:'Nur stornierte Anfragen können erneut eingereicht werden.'});
+ if(ride.status!=='cancelled')return res.status(409).json({error:'Nur stornierte Anfragen können erneut eingereicht werden.'});
+  if(['closed','rejected'].includes(String(ride.admin_status||''))||['resolved','rejected'].includes(String(ride.dispute_status||'')))return res.status(403).json({error:'Diese Anfrage wurde vom Admin geschlossen und kann nicht erneut eingereicht werden. Bitte erstelle eine neue Anfrage.'});
  const result=db.prepare("UPDATE ride_requests SET status='new',admin_status=NULL,assigned_driver_id=NULL,accepted_at=NULL,admin_approved_at=NULL WHERE id=? AND customer_id=? AND status='cancelled'").run(id,req.user.id);
  if(!result.changes)return res.status(409).json({error:'Anfrage wurde zwischenzeitlich geändert.'});
  res.json({message:'Anfrage erneut eingereicht und wartet auf Admin-Freigabe.'});
@@ -937,14 +938,14 @@ app.post('/api/notifications/read',requireRole('customer','driver','admin'),(req
 
 // Separate administrator conversations. Closed threads remain readable only by admins.
 function adminChatParticipant(ride,user){return (user.role==='customer'&&Number(ride.customer_id)===Number(user.id))||(user.role==='driver'&&Number(ride.assigned_driver_id)===Number(user.id));}
-function adminChatClosed(ride){return ['resolved','rejected'].includes(String(ride.dispute_status||''));}
+function adminChatClosed(ride){return ['resolved','rejected'].includes(String(ride.dispute_status||''))||['closed','rejected'].includes(String(ride.admin_status||''));}
 function addAdminChatNotification(recipientId,rideId,messageId,actorId){
  if(!recipientId||Number(recipientId)===Number(actorId))return;
  const saved=db.prepare("INSERT INTO app_notifications(recipient_id,ride_request_id,kind,status,admin_message_id) VALUES(?,?,'status','admin_message',?)").run(recipientId,rideId,messageId);
  sendPushToUser(recipientId,{kind:'status',status:'admin_message',rideId,notificationId:Number(saved.lastInsertRowid)}).catch(()=>{});
 }
 app.get('/api/admin/rides/:id/admin-chat/:participantId',requireRole('admin'),(req,res)=>{
- const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
+ const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status,admin_status FROM ride_requests WHERE id=?').get(id);
  if(!ride||![ride.customer_id,ride.assigned_driver_id].map(Number).includes(participantId))return res.status(404).json({error:'Gespräch nicht gefunden.'});
  const participant=db.prepare('SELECT id,name,role FROM users WHERE id=?').get(participantId);
  const messages=db.prepare('SELECT m.id,m.sender_user_id,m.message,m.created_at,u.name AS sender_name FROM admin_chat_messages m JOIN users u ON u.id=m.sender_user_id WHERE m.ride_request_id=? AND m.participant_user_id=? ORDER BY m.id DESC LIMIT 200').all(id,participantId).reverse();
