@@ -733,7 +733,11 @@ app.patch('/api/rides/:id',requireRole('customer'),async(req,res)=>{
  const type=['airport','garden','moving','multi'].includes(b.serviceType)?b.serviceType:null;
  const pickup=clean(b.pickup,180),destination=clean(b.destination,180),date=clean(b.travelDate,10),time=clean(b.travelTime,5),price=Number(b.priceEuro);
  const pickupPlz=clean(b.pickupPlz,5),destinationPlz=clean(b.destinationPlz,5);
- const pickupInfo=type==='multi'?null:await resolveSelectedLocality(pickupPlz,pickup),destinationInfo=(type==='airport'||type==='moving')?await resolveSelectedLocality(destinationPlz,destination):null;
+ // Reuse the saved, verified place when it has not changed. Editing another field must not depend on an external postal lookup.
+ const samePickup=pickupPlz===String(old.pickup_plz||'')&&pickup===String(old.pickup||'');
+ const sameDestination=destinationPlz===String(old.destination_plz||'')&&destination===String(old.destination||'');
+ const pickupInfo=type==='multi'?null:(samePickup?{plz:old.pickup_plz,state:old.pickup_state,lat:old.pickup_lat,lon:old.pickup_lon}:await resolveSelectedLocality(pickupPlz,pickup));
+ const destinationInfo=(type==='airport'||type==='moving')?(sameDestination?{plz:old.destination_plz,state:null,lat:null,lon:null}:await resolveSelectedLocality(destinationPlz,destination)):null;
  const now=new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date()).replace(' ','T');
  if(!type||(!pickup&&type!=='multi')||(type!=='multi'&&!pickupInfo)||((type==='airport'||type==='moving')&&(destination.length<2||!destinationInfo))||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)||`${date}T${time}`<now||!Number.isFinite(price)||price<1||price>10000||Math.round(price*100)!==price*100)return res.status(400).json({error:'Bitte prüfe Dienstleistung, Start, Ziel, Datum, Uhrzeit und Preis.'});
  const desc=clean(b.serviceDescription,2000),gardenTask=['lawn','hedge','cleaning','other'].includes(b.gardenTask)?b.gardenTask:null;
