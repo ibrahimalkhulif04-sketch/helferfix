@@ -385,11 +385,25 @@ async function fetchOpenPlzLocalities(params) {
  }
  return all;
 }
+// Pilot locality aliases for Merseburg (PLZ 06217). Names are official/local district names.
+const MERSEBURG_ORTSTEILE_06217 = [
+ {postalCode:'06217',city:'Merseburg',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Atzendorf',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Beuna',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Blösien',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Geusa',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Kötzschen',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Meuschau',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Neumarkt',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Trebnitz',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Venenien',state:'Sachsen-Anhalt'},
+ {postalCode:'06217',city:'Zscherben',state:'Sachsen-Anhalt'}
+];
 async function searchGermanLocalities(query) {
  const q=String(query||'').trim();
  if(q.length<2||q.length>80)return [];
  const params=new URLSearchParams();
- if(/^\d+$/.test(q))params.set('postalCode',q.length===5?q:'^'+q);
+ if(/^\\d+$/.test(q))params.set('postalCode',q.length===5?q:'^'+q);
  else {
   const safe=q.replace(/[^A-Za-zÄÖÜäöüß0-9 '-]/g,'').trim();
   if(safe.length<2)return [];
@@ -399,14 +413,23 @@ async function searchGermanLocalities(query) {
  for(const row of rows){
   const postalCode=String(row.postalcode||row.postalCode||'').trim();
   const city=String(row.name||'').trim(),state=String(row.federalState?.name||'').trim();
-  if(!/^\d{5}$/.test(postalCode)||!city||!state)continue;
+  if(!/^\\d{5}$/.test(postalCode)||!city||!state)continue;
   unique.set(postalCode+'|'+city.toLocaleLowerCase('de'),{postalCode,city,state});
  }
+ const normalized=q.toLocaleLowerCase('de');
+ const pilotMatches=MERSEBURG_ORTSTEILE_06217.filter(item=>
+  /^\\d+$/.test(q)
+   ? item.postalCode.startsWith(q)
+   : item.city.toLocaleLowerCase('de').startsWith(normalized) || normalized==='merseburg'
+ );
+ for(const item of pilotMatches)unique.set(item.postalCode+'|'+item.city.toLocaleLowerCase('de'),item);
  return [...unique.values()].slice(0,250);
 }
 async function resolveSelectedLocality(plz,city) {
  const code=String(plz||'').trim(),name=String(city||'').trim();
- if(!/^\d{5}$/.test(code)||!name||name.length>180)return null;
+ if(!/^\\d{5}$/.test(code)||!name||name.length>180)return null;
+ const pilot=MERSEBURG_ORTSTEILE_06217.find(item=>item.postalCode===code&&item.city.toLocaleLowerCase('de')===name.toLocaleLowerCase('de'));
+ if(pilot)return {plz:code,locality:pilot.city,state:pilot.state,lat:null,lon:null};
  const rows=await fetchOpenPlzLocalities(new URLSearchParams({postalCode:code}));
  const row=rows.find(item=>String(item.postalcode||item.postalCode||'').trim()===code&&String(item.name||'').trim().toLocaleLowerCase('de')===name.toLocaleLowerCase('de'));
  if(!row)return null;
