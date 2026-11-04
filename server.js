@@ -99,6 +99,7 @@ if (!rideColumns.includes('service_confirmed_at')) db.exec('ALTER TABLE ride_req
 if (!rideColumns.includes('service_disputed_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_disputed_at TEXT');
 if (!rideColumns.includes('service_dispute_reason')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_dispute_reason TEXT');
 if (!rideColumns.includes('service_dispute_deadline_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_dispute_deadline_at TEXT');
+if (!rideColumns.includes('service_reminder_sent_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_reminder_sent_at TEXT');
 if (!rideColumns.includes('commission_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN commission_cents INTEGER');
 if (!rideColumns.includes('driver_payout_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN driver_payout_cents INTEGER');
 const existingRideColumns = new Set(rideColumns);
@@ -256,9 +257,9 @@ if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
  }
 }
 const pushText = {
- de: { message: 'Du hast eine neue Nachricht in HelferFix.', status: s => s==='new_request'?'Ein neuer Auftrag ist verfügbar. Öffne HelferFix, um die Anfrage anzusehen.':`Der Status deiner Anfrage wurde geändert: ${({new:'Wartet auf Admin-Freigabe',quoted:'Freigegeben – wartet auf Dienstleister',accepted:'Angenommen',cancelled:'Storniert',completed:'Abgeschlossen'}[s]||s)}.` },
- ar: { message: 'وصلتك رسالة جديدة في HelferFix.', status: s => s==='new_request'?'يتوفر طلب خدمة جديد. افتح HelferFix للاطلاع عليه.':`تم تغيير حالة طلبك: ${({new:'بانتظار موافقة المسؤول',quoted:'تمت الموافقة – بانتظار مقدم الخدمة',accepted:'تم قبول الطلب',cancelled:'ملغى',completed:'مكتمل'}[s]||s)}.` },
- en: { message: 'You have a new message in HelferFix.', status: s => s==='new_request'?'A new service request is available. Open HelferFix to view it.':`Your request status changed: ${({new:'Waiting for admin approval',quoted:'Approved – waiting for a provider',accepted:'Accepted',cancelled:'Cancelled',completed:'Completed'}[s]||s)}.` }
+ de: { message: 'Du hast eine neue Nachricht in HelferFix.', status: s => s==='service_reminder'?'Erinnerung: Bitte bestätige die abgeschlossene Leistung oder melde innerhalb der Frist ein Problem.':s==='new_request'?'Ein neuer Auftrag ist verfügbar. Öffne HelferFix, um die Anfrage anzusehen.':`Der Status deiner Anfrage wurde geändert: ${({new:'Wartet auf Admin-Freigabe',quoted:'Freigegeben – wartet auf Dienstleister',accepted:'Angenommen',cancelled:'Storniert',completed:'Abgeschlossen'}[s]||s)}.` },
+ ar: { message: 'وصلتك رسالة جديدة في HelferFix.', status: s => s==='service_reminder'?'تذكير: يرجى تأكيد اكتمال الخدمة أو الإبلاغ عن مشكلة ضمن المهلة.':s==='new_request'?'يتوفر طلب خدمة جديد. افتح HelferFix للاطلاع عليه.':`تم تغيير حالة طلبك: ${({new:'بانتظار موافقة المسؤول',quoted:'تمت الموافقة – بانتظار مقدم الخدمة',accepted:'تم قبول الطلب',cancelled:'ملغى',completed:'مكتمل'}[s]||s)}.` },
+ en: { message: 'You have a new message in HelferFix.', status: s => s==='service_reminder'?'Reminder: Please confirm the completed service or report an issue before the deadline.':s==='new_request'?'A new service request is available. Open HelferFix to view it.':`Your request status changed: ${({new:'Waiting for admin approval',quoted:'Approved – waiting for a provider',accepted:'Accepted',cancelled:'Cancelled',completed:'Completed'}[s]||s)}.` }
 };
 function notificationBody(kind, status, language='de') { const pack=pushText[language]||pushText.de; return kind==='message'?pack.message:pack.status(status); }
 async function sendPushToUser(userId, payload) {
@@ -295,6 +296,19 @@ function notifyRideStatus(ride, status, actorId, extraUserId=null) {
  addUserNotification(ride.customer_id,ride.id,'status',status,null,actorId);
  if (extraUserId && Number(extraUserId)!==Number(ride.customer_id)) addUserNotification(extraUserId,ride.id,'status',status,null,actorId);
 }
+
+// Send one reminder 24 hours after the provider marks a service complete.
+const serviceReminderTimer = setInterval(()=>{
+ try {
+  const due=db.prepare("SELECT id,customer_id FROM ride_requests WHERE status='accepted' AND service_stage='awaiting_customer' AND service_completed_at IS NOT NULL AND service_reminder_sent_at IS NULL AND service_completed_at<=datetime('now','-24 hours')").all();
+  for(const ride of due){
+   const mark=db.prepare("UPDATE ride_requests SET service_reminder_sent_at=CURRENT_TIMESTAMP WHERE id=? AND service_stage='awaiting_customer' AND service_reminder_sent_at IS NULL").run(ride.id);
+   if(mark.changes)addUserNotification(ride.customer_id,ride.id,'status','service_reminder');
+  }
+ } catch(error){console.error('[service-reminder] failed:',error.message);}
+},15*60*1000);
+if(typeof serviceReminderTimer.unref==='function')serviceReminderTimer.unref();
+
 function notifyDriversOfNewRide(ride, actorId=null) {
  if (!ride || ride.status!=='quoted' || ride.assigned_driver_id) return;
  const drivers=db.prepare("SELECT id FROM users WHERE role='driver' AND active=1 AND notify_new_requests=1").all();
