@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
  delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_ride_id ON chat_messages(ride_request_id, id);
+CREATE TABLE IF NOT EXISTS admin_chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, participant_user_id INTEGER NOT NULL REFERENCES users(id), sender_user_id INTEGER NOT NULL REFERENCES users(id), message TEXT NOT NULL CHECK(length(message) BETWEEN 1 AND 2000), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_admin_chat_thread ON admin_chat_messages(ride_request_id,participant_user_id,id);
 CREATE TABLE IF NOT EXISTS chat_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_chat_notifications_recipient ON chat_notifications(recipient_id, read_at, id);
 CREATE TABLE IF NOT EXISTS app_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('message','status')), status TEXT, message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT);
@@ -79,6 +81,8 @@ const userColumns = db.prepare('PRAGMA table_info(users)').all().map(c => c.name
 if (!userColumns.includes('notify_new_requests')) db.exec('ALTER TABLE users ADD COLUMN notify_new_requests INTEGER NOT NULL DEFAULT 0');
 if (!userColumns.includes('phone_encrypted')) db.exec('ALTER TABLE users ADD COLUMN phone_encrypted TEXT');
 if (!userColumns.includes('name_changed_at')) db.exec('ALTER TABLE users ADD COLUMN name_changed_at TEXT');
+if (!userColumns.includes('ban_until')) db.exec('ALTER TABLE users ADD COLUMN ban_until TEXT');
+if (!userColumns.includes('ban_reason')) db.exec('ALTER TABLE users ADD COLUMN ban_reason TEXT');
 
 // Safe, additive migration: add delivery and read receipts without changing existing messages or accounts.
 const chatMessageColumns = db.prepare('PRAGMA table_info(chat_messages)').all().map(c => c.name);
@@ -100,6 +104,9 @@ if (!rideColumns.includes('service_disputed_at')) db.exec('ALTER TABLE ride_requ
 if (!rideColumns.includes('service_dispute_reason')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_dispute_reason TEXT');
 if (!rideColumns.includes('service_dispute_deadline_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_dispute_deadline_at TEXT');
 if (!rideColumns.includes('service_reminder_sent_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_reminder_sent_at TEXT');
+if (!rideColumns.includes('dispute_status')) db.exec("ALTER TABLE ride_requests ADD COLUMN dispute_status TEXT NOT NULL DEFAULT 'none'");
+if (!rideColumns.includes('dispute_updated_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN dispute_updated_at TEXT');
+if (!rideColumns.includes('admin_resolution_note')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_resolution_note TEXT');
 if (!rideColumns.includes('commission_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN commission_cents INTEGER');
 if (!rideColumns.includes('driver_payout_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN driver_payout_cents INTEGER');
 const existingRideColumns = new Set(rideColumns);
@@ -221,7 +228,7 @@ function decryptPhone(value) {
 }
 function currentUser(req) {
  if (!req.session.userId) return null;
- return db.prepare('SELECT id,name,email,role,created_at,active,notify_new_requests FROM users WHERE id=?').get(req.session.userId) || null;
+ return db.prepare('SELECT id,name,email,role,created_at,active,notify_new_requests,ban_until,ban_reason FROM users WHERE id=?').get(req.session.userId) || null;
 }
 function requireAuth(req,res,next) {
  const user=currentUser(req); if (!user || !user.active) return res.status(401).json({error:'Bitte melde dich an.'}); req.user=user; next();
@@ -638,6 +645,7 @@ app.post('/api/auth/logout',(req,res)=>req.session.destroy(()=>{res.clearCookie(
 
 // Customer requests: service-specific details are saved; all requests wait for admin approval.
 app.post('/api/rides',requireRole('customer'),async(req,res)=>{
+ const ban=db.prepare('SELECT ban_until FROM users WHERE id=?').get(req.user.id);if(ban?.ban_until&&Date.parse(String(ban.ban_until).replace(' ','T')+'Z')>Date.now())return res.status(403).json({error:'Dein Konto ist bis '+ban.ban_until+' für neue Anfragen gesperrt.'});
  const serviceType=['airport','garden','moving','multi'].includes(req.body.serviceType)?req.body.serviceType:'airport';
  const pickup=clean(req.body.pickup,180) || (serviceType==='multi'?'—':'');
  const destination=clean(req.body.destination,180) || (serviceType==='garden'||serviceType==='multi'?pickup:'');
@@ -782,6 +790,7 @@ app.get('/api/rides/open',requireRole('driver'),async(req,res)=>{
 });
 // Atomic conditional update: only one driver can claim a request.
 app.post('/api/rides/:id/accept',requireRole('driver'),(req,res)=>{
+ const ban=db.prepare('SELECT ban_until FROM users WHERE id=?').get(req.user.id);if(ban?.ban_until&&Date.parse(String(ban.ban_until).replace(' ','T')+'Z')>Date.now())return res.status(403).json({error:'Dein Konto ist bis '+ban.ban_until+' für neue Aufträge gesperrt.'});
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
  const tx=db.transaction(()=>{
   const ride=db.prepare("SELECT price_cents,commission_cents,driver_payout_cents FROM ride_requests WHERE id=? AND status='quoted' AND assigned_driver_id IS NULL").get(id);
@@ -808,8 +817,10 @@ app.post('/api/rides/:id/cancel',requireRole('driver'),(req,res)=>{
   return result.changes;
  });
  if(!tx())return res.status(409).json({error:'Diese Anfrage ist dir nicht zugeordnet oder wurde bereits geändert.'});
+ const returned=db.prepare('SELECT dispute_status FROM ride_requests WHERE id=?').get(id);if(returned?.dispute_status&&returned.dispute_status!=='none')db.prepare("UPDATE ride_requests SET dispute_status='received',dispute_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+ db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,'driver_release','accepted','new',?)").run(id,req.user.id,'driver',JSON.stringify({returnedToAdmin:true}));
  notifyRideStatus(before,'new',req.user.id);
- res.json({message:'Anfrage wurde zur erneuten Admin-Freigabe zurückgegeben.'});
+ res.json({message:'Anfrage wurde zur erneuten Admin-Prüfung zurückgegeben.'});
 });
 
 app.post('/api/rides/:id/service-action',requireRole('customer','driver'),(req,res)=>{
@@ -827,10 +838,11 @@ app.post('/api/rides/:id/service-action',requireRole('customer','driver'),(req,r
  if(req.user.role!==rule.role)return res.status(403).json({error:'Keine Berechtigung für diese Aktion.'});
  if(stage!==rule.from)return res.status(409).json({error:'Dieser Schritt ist bereits erledigt oder derzeit nicht möglich.'});
  const tx=db.transaction(()=>{
+  if(action==='dispute')db.prepare("UPDATE ride_requests SET dispute_status='received',dispute_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
   const deadline=action==='finish'?", service_dispute_deadline_at=datetime('now','+48 hours')":'';
   const result=db.prepare("UPDATE ride_requests SET service_stage=?, "+rule.column+"=CURRENT_TIMESTAMP"+deadline+" WHERE id=? AND status='accepted' AND service_stage=?").run(rule.to,id,stage);
   if(!result.changes)return false;
-  db.prepare('INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,?,?,?,?)').run(id,req.user.id,req.user.role,'service_'+action,ride.status,ride.status,JSON.stringify({from:stage,to:rule.to}));
+  db.prepare('INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,?,?,?,?)').run(id,req.user.id,req.user.role,'service_'+action,ride.status,ride.status,JSON.stringify({from:stage,to:rule.to,disputeStatus:action==='dispute'?'received':null}));
   return true;
  });
  if(!tx())return res.status(409).json({error:'Der Auftragsstatus wurde inzwischen geändert. Bitte aktualisiere die Seite.'});
@@ -911,6 +923,59 @@ app.post('/api/notifications/read',requireRole('customer','driver','admin'),(req
  res.json({ok:true});
 });
 
+// Separate administrator conversations: each participant can only see their own thread with the admin.
+function adminChatParticipant(ride,user){return (user.role==='customer'&&Number(ride.customer_id)===Number(user.id))||(user.role==='driver'&&Number(ride.assigned_driver_id)===Number(user.id));}
+app.get('/api/admin/rides/:id/admin-chat/:participantId',requireRole('admin'),(req,res)=>{
+ const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE id=?').get(id);
+ if(!ride||![ride.customer_id,ride.assigned_driver_id].map(Number).includes(participantId))return res.status(404).json({error:'Gespräch nicht gefunden.'});
+ const participant=db.prepare('SELECT id,name,role FROM users WHERE id=?').get(participantId);
+ const messages=db.prepare('SELECT m.id,m.sender_user_id,m.message,m.created_at,u.name AS sender_name FROM admin_chat_messages m JOIN users u ON u.id=m.sender_user_id WHERE m.ride_request_id=? AND m.participant_user_id=? ORDER BY m.id DESC LIMIT 200').all(id,participantId).reverse();
+ res.json({participant,messages});
+});
+app.post('/api/admin/rides/:id/admin-chat/:participantId',requireRole('admin'),(req,res)=>{
+ const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE id=?').get(id);
+ if(!ride||![ride.customer_id,ride.assigned_driver_id].map(Number).includes(participantId))return res.status(404).json({error:'Gespräch nicht gefunden.'});
+ const message=typeof req.body?.message==='string'?req.body.message.trim():'';if(!message||message.length>2000)return res.status(400).json({error:'Bitte gib eine Nachricht mit 1 bis 2000 Zeichen ein.'});
+ db.prepare('INSERT INTO admin_chat_messages(ride_request_id,participant_user_id,sender_user_id,message) VALUES(?,?,?,?)').run(id,participantId,req.user.id,message);
+ addUserNotification(participantId,id,'status','admin_message',null,req.user.id);
+ res.status(201).json({ok:true});
+});
+app.get('/api/rides/:id/admin-chat',requireRole('customer','driver'),(req,res)=>{
+ const id=Number(req.params.id),ride=db.prepare('SELECT id,customer_id,assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
+ if(!ride||!adminChatParticipant(ride,req.user)||!ride.dispute_status||ride.dispute_status==='none')return res.status(403).json({error:'Dieses Admin-Gespräch ist nicht verfügbar.'});
+ const messages=db.prepare('SELECT m.id,m.sender_user_id,m.message,m.created_at,u.name AS sender_name FROM admin_chat_messages m JOIN users u ON u.id=m.sender_user_id WHERE m.ride_request_id=? AND m.participant_user_id=? ORDER BY m.id DESC LIMIT 200').all(id,req.user.id).reverse();
+ res.json({counterpartName:'HelferFix Admin',messages});
+});
+app.post('/api/rides/:id/admin-chat',requireRole('customer','driver'),(req,res)=>{
+ const id=Number(req.params.id),ride=db.prepare('SELECT id,customer_id,assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
+ if(!ride||!adminChatParticipant(ride,req.user)||!ride.dispute_status||ride.dispute_status==='none')return res.status(403).json({error:'Dieses Admin-Gespräch ist nicht verfügbar.'});
+ const message=typeof req.body?.message==='string'?req.body.message.trim():'';if(!message||message.length>2000)return res.status(400).json({error:'Bitte gib eine Nachricht mit 1 bis 2000 Zeichen ein.'});
+ const admin=db.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").get();if(!admin)return res.status(503).json({error:'Admin ist momentan nicht erreichbar.'});
+ db.prepare('INSERT INTO admin_chat_messages(ride_request_id,participant_user_id,sender_user_id,message) VALUES(?,?,?,?)').run(id,req.user.id,req.user.id,message);
+ addUserNotification(admin.id,id,'status','admin_message',null,req.user.id);
+ res.status(201).json({ok:true});
+});
+app.patch('/api/admin/rides/:id/dispute',requireRole('admin'),(req,res)=>{
+ const id=Number(req.params.id),status=String(req.body?.status||''),note=clean(req.body?.note,1000);
+ const allowed=['received','reviewing','waiting_customer','waiting_driver','resolved','rejected'];
+ if(!Number.isInteger(id)||!allowed.includes(status))return res.status(400).json({error:'Ungültiger Prüfstatus.'});
+ const ride=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
+ if(!ride.service_disputed_at&&ride.dispute_status==='none')return res.status(409).json({error:'Für diese Anfrage liegt kein Einspruch vor.'});
+ db.prepare('UPDATE ride_requests SET dispute_status=?,dispute_updated_at=CURRENT_TIMESTAMP,admin_resolution_note=CASE WHEN ? IN (\'resolved\',\'rejected\') THEN ? ELSE admin_resolution_note END WHERE id=?').run(status,status,note||null,id);
+ db.prepare('INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,\'admin_dispute_update\',?,?,?)').run(id,req.user.id,'admin',ride.dispute_status,status,JSON.stringify({note:note||null}));
+ const updated=db.prepare('SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE id=?').get(id);notifyRideStatus(updated,'dispute_'+status,req.user.id,updated.assigned_driver_id);
+ res.json({ok:true,status});
+});
+app.patch('/api/admin/users/:id/ban',requireRole('admin'),(req,res)=>{
+ const id=Number(req.params.id),days=req.body?.days,reason=clean(req.body?.reason,500);
+ if(!Number.isInteger(id)||id<1||!(days===null||Number.isInteger(days)&&days>=1&&days<=3650))return res.status(400).json({error:'Bitte gib eine Sperrdauer zwischen 1 und 3650 Tagen an oder null zum Aufheben.'});
+ const target=db.prepare('SELECT id,role FROM users WHERE id=?').get(id);if(!target)return res.status(404).json({error:'Nutzer nicht gefunden.'});if(target.role==='admin')return res.status(400).json({error:'Admin-Konten können nicht gesperrt werden.'});
+ const until=days===null?null:new Date(Date.now()+days*86400000).toISOString();
+ db.prepare('UPDATE users SET ban_until=?,ban_reason=? WHERE id=?').run(until,days===null?null:reason||'Admin-Sperre',id);
+ db.prepare('INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,details) SELECT id,?,\'admin\',\'user_ban_change\',? FROM ride_requests WHERE customer_id=? OR assigned_driver_id=?').run(req.user.id,JSON.stringify({userId:id,days,reason}),id,id);
+ res.json({ok:true,banUntil:until});
+});
+
 app.get('/api/admin/summary',requireRole('admin'),(req,res)=>res.json({
  users:db.prepare('SELECT COUNT(*) n FROM users').get().n,
  drivers:db.prepare("SELECT COUNT(*) n FROM users WHERE role='driver'").get().n,
@@ -919,7 +984,7 @@ app.get('/api/admin/summary',requireRole('admin'),(req,res)=>res.json({
  newRides:db.prepare("SELECT COUNT(*) n FROM ride_requests WHERE status='new'").get().n,
  availableRides:db.prepare("SELECT COUNT(*) n FROM ride_requests WHERE status='quoted'").get().n
 }));
-app.get('/api/admin/users',requireRole('admin'),(req,res)=>res.json({users:db.prepare('SELECT id,name,email,role,active,created_at FROM users ORDER BY id DESC LIMIT 500').all()}));
+app.get('/api/admin/users',requireRole('admin'),(req,res)=>res.json({users:db.prepare('SELECT id,name,email,role,active,created_at,ban_until,ban_reason FROM users ORDER BY id DESC LIMIT 500').all()}));
 app.patch('/api/admin/users/:id',requireRole('admin'),(req,res)=>{
  const id=Number(req.params.id),active=req.body.active;if(!Number.isInteger(id)||typeof active!=='boolean')return res.status(400).json({error:'Ungültige Daten.'});
  const target=db.prepare('SELECT id,role FROM users WHERE id=?').get(id);if(!target)return res.status(404).json({error:'Nutzer nicht gefunden.'});if(target.role==='admin')return res.status(400).json({error:'Admin-Konten können hier nicht deaktiviert werden.'});
