@@ -165,16 +165,17 @@ function clearLocationChoice(side,clearLegacy=true){
  if(clearLegacy){$(side).value='';$(side+'Plz').value='';}
 }
 function selectLocation(side,item){
- chosenLocations[side]={city:item.city,postalCode:item.postalCode,state:item.state};
- $(side).value=item.city;
- $(side+'Plz').value=item.postalCode;
- const search=$(side==='pickup'?'pickupSearch':'destinationSearch');
- search.value=item.city+' · '+item.postalCode;
- $(side==='pickup'?'pickupResults':'destinationResults').replaceChildren();
- const info=$(side==='pickup'?'pickupSearchInfo':'destinationSearchInfo');
- info.textContent=t('locationSelected')+': '+item.city+' · '+item.postalCode+' · '+item.state;
- info.style.color='var(--green)';
-}
+  chosenLocations[side]={city:item.city,postalCode:item.postalCode,state:item.state};
+  $(side).value=item.city;
+  $(side+'Plz').value=item.postalCode;
+  const search=$(side==='pickup'?'pickupSearch':'destinationSearch');
+  const display=item.label||item.city;
+  search.value=display+' · '+item.postalCode;
+  $(side==='pickup'?'pickupResults':'destinationResults').replaceChildren();
+  const info=$(side==='pickup'?'pickupSearchInfo':'destinationSearchInfo');
+  info.textContent=t('locationSelected')+': '+display+' · '+item.postalCode+' · '+item.state;
+  info.style.color='var(--green)';
+ }
 async function searchLocation(side,query){
  const results=$(side==='pickup'?'pickupResults':'destinationResults');
  results.replaceChildren();
@@ -188,7 +189,7 @@ async function searchLocation(side,query){
   if(!items.length){const empty=document.createElement('div');empty.textContent=t('locationNoResults');empty.className='smallmuted';empty.style.padding='10px 12px';results.append(empty);return;}
   for(const item of items){
    const button=document.createElement('button');button.type='button';button.setAttribute('role','option');
-   button.textContent=item.city+' · '+item.postalCode+' · '+item.state;
+   button.textContent=(item.label||item.city)+' · '+item.postalCode+' · '+item.state;
    button.addEventListener('click',()=>selectLocation(side,item));results.append(button);
   }
  }catch(error){const message=document.createElement('div');message.textContent=t('locationSearchError');message.className='smallmuted';message.style.padding='10px 12px';results.append(message);}
@@ -201,7 +202,7 @@ function setupLocationSearch(side){
   info.textContent='';
   clearTimeout(locationSearchTimers[side]);
   const query=search.value;
-  locationSearchTimers[side]=setTimeout(()=>searchLocation(side,query),250);
+  locationSearchTimers[side]=setTimeout(()=>searchLocation(side,query),350);
  });
  search.addEventListener('focus',()=>{if(search.value.trim().length>=2)searchLocation(side,search.value);});
 }
