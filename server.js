@@ -92,6 +92,7 @@ if (!chatMessageColumns.includes('read_at')) db.exec('ALTER TABLE chat_messages 
 // Safe, additive migration: old accounts, requests and quote history remain in place.
 const rideColumns = db.prepare('PRAGMA table_info(ride_requests)').all().map(c => c.name);
 for (const [column, definition] of Object.entries({pickup_plz:'TEXT',pickup_state:'TEXT',pickup_lat:'REAL',pickup_lon:'REAL',destination_plz:'TEXT'})) if(!rideColumns.includes(column)) db.exec(`ALTER TABLE ride_requests ADD COLUMN ${column} ${definition}`);
+if (!rideColumns.includes('city')) db.exec('ALTER TABLE ride_requests ADD COLUMN city TEXT');
 if (!rideColumns.includes('price_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN price_cents INTEGER');
 if (!rideColumns.includes('assigned_driver_id')) db.exec('ALTER TABLE ride_requests ADD COLUMN assigned_driver_id INTEGER REFERENCES users(id)');
 if (!rideColumns.includes('admin_approved_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_approved_at TEXT');
@@ -678,7 +679,7 @@ app.post('/api/rides',requireRole('customer'),async(req,res)=>{
  const childSeatsNeeded=Number(req.body.childSeatsNeeded||0);
  const childAgesHeights=clean(req.body.childAgesHeights,200);
  const childSeatProvider=['customer','driver','none'].includes(req.body.childSeatProvider)?req.body.childSeatProvider:'none';
- if((serviceType!=='multi'&&(!pickup||pickup.length<2||!pickupInfo))||((serviceType==='airport'||serviceType==='moving')&&(!destination||destination.length<2||!destinationInfo)))return res.status(400).json({error:'Bitte wähle für Start und Ziel jeweils einen passenden Ort mit PLZ aus der Vorschlagsliste.'});
+ if(!pickup||pickup.length<2||(serviceType!=='multi'&&!pickupInfo)||((serviceType==='airport'||serviceType==='moving')&&(!destination||destination.length<2||!destinationInfo)))return res.status(400).json({error:'Bitte wähle für Start und Ziel jeweils einen passenden Ort mit PLZ aus der Vorschlagsliste.'});
  if(!travelDate||!/^\d{4}-\d{2}-\d{2}$/.test(travelDate)||!travelTime||!/^([01]\d|2[0-3]):[0-5]\d$/.test(travelTime))return res.status(400).json({error:'Bitte Datum und Uhrzeit angeben.'});
  // Reject past dates/times using the local German time zone, regardless of the server's UTC clock.
  const berlinNow = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date()).replace(' ', 'T');
@@ -739,7 +740,7 @@ app.patch('/api/rides/:id',requireRole('customer'),async(req,res)=>{
  const pickupInfo=type==='multi'?null:(samePickup?{plz:old.pickup_plz,state:old.pickup_state,lat:old.pickup_lat,lon:old.pickup_lon}:await resolveSelectedLocality(pickupPlz,pickup));
  const destinationInfo=(type==='airport'||type==='moving')?(sameDestination?{plz:old.destination_plz,state:null,lat:null,lon:null}:await resolveSelectedLocality(destinationPlz,destination)):null;
  const now=new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date()).replace(' ','T');
- if(!type||(!pickup&&type!=='multi')||(type!=='multi'&&!pickupInfo)||((type==='airport'||type==='moving')&&(destination.length<2||!destinationInfo))||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)||`${date}T${time}`<now||!Number.isFinite(price)||price<1||price>10000||Math.round(price*100)!==price*100)return res.status(400).json({error:'Bitte prüfe Dienstleistung, Start, Ziel, Datum, Uhrzeit und Preis.'});
+ if(!type||!pickup||pickup.length<2||(type!=='multi'&&!pickupInfo)||((type==='airport'||type==='moving')&&(destination.length<2||!destinationInfo))||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)||`${date}T${time}`<now||!Number.isFinite(price)||price<1||price>10000||Math.round(price*100)!==price*100)return res.status(400).json({error:'Bitte prüfe Dienstleistung, Start, Ziel, Datum, Uhrzeit und Preis.'});
  const desc=clean(b.serviceDescription,2000),gardenTask=['lawn','hedge','cleaning','other'].includes(b.gardenTask)?b.gardenTask:null;
  const gardenSize=b.gardenSizeM2===''||b.gardenSizeM2==null?null:Number(b.gardenSizeM2),gardenHours=b.gardenHours===''||b.gardenHours==null?null:Number(b.gardenHours);
  const movingTask=['move','assembly','both'].includes(b.movingTask)?b.movingTask:null;
