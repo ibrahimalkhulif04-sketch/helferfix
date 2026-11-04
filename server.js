@@ -790,7 +790,7 @@ app.post('/api/rides/:id/repost',requireRole('customer'),(req,res)=>{
 });
 // Drivers see only admin-approved requests. Price is fixed; there is no driver price-offer route.
 app.get('/api/rides/open',requireRole('driver'),async(req,res)=>{
- const rides=db.prepare("SELECT r.* FROM ride_requests r WHERE r.status='quoted' AND r.assigned_driver_id IS NULL AND EXISTS (SELECT 1 FROM users c WHERE c.id=r.customer_id AND c.active=1) ORDER BY r.id DESC").all();
+ const rides=db.prepare("SELECT r.* FROM ride_requests r WHERE r.status='quoted' AND r.assigned_driver_id IS NULL AND (r.admin_status IS NULL OR r.admin_status='approved') AND EXISTS (SELECT 1 FROM users c WHERE c.id=r.customer_id AND c.active=1) ORDER BY r.id DESC").all();
  const area=db.prepare('SELECT base_plz,radius_km,states_json,postal_codes_json FROM provider_service_areas WHERE user_id=?').get(req.user.id);if(!area)return res.json({rides:rides.map(withDriverMoney)});
  const base=await resolveGermanPlz(area.base_plz);let states=[],codes=[];try{states=JSON.parse(area.states_json||'[]');}catch{}try{codes=JSON.parse(area.postal_codes_json||'[]');}catch{}
  const filtered=[];for(const ride of rides){if(!ride.pickup_plz)continue;const info=await resolveGermanPlz(ride.pickup_plz);if(!info)continue;const explicit=codes.includes(info.plz)||states.includes(info.state);const radius=!!base&&base.lat!=null&&base.lon!=null&&info.lat!=null&&info.lon!=null&&distanceKm({lat:base.lat,lon:base.lon},{lat:info.lat,lon:info.lon})<=area.radius_km;if(explicit||radius)filtered.push(ride);}res.json({rides:filtered.map(withDriverMoney)});
@@ -1033,7 +1033,7 @@ app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
  if(!changed.changes)return res.status(409).json({error:'Der Auftrag konnte nicht aktualisiert werden.'});
  db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,'admin_status_change',?,?,?)").run(id,req.user.id,'admin',ride.admin_status||ride.status,adminStatus,JSON.stringify({operational_old:ride.status,operational_new:operationalStatus}));
  const updated=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);
- if(adminStatus==='approved'&&ride.status!=='quoted')notifyDriversOfNewRide(updated,req.user.id);
+ if(adminStatus==='approved'&&(ride.status!=='quoted'||ride.admin_status!=='approved'))notifyDriversOfNewRide(updated,req.user.id);
  if(ride.admin_status!==adminStatus||ride.status!==operationalStatus){
   notifyRideStatus(updated,adminStatus,req.user.id,ride.assigned_driver_id);
  }
