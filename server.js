@@ -753,7 +753,7 @@ app.patch('/api/rides/:id',requireRole('customer'),async(req,res)=>{
  const photos=Array.isArray(b.photos)?b.photos:null;let photosJson=old.photos_json;
  if(photos&&photos.length){if(photos.length>3||photos.some(p=>!p||typeof p.name!=='string'||p.name.length>120||!['image/jpeg','image/png','image/webp'].includes(p.type)||typeof p.data!=='string'||p.data.length>1400000||!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(p.data)))return res.status(400).json({error:'Bitte lade höchstens 3 gültige Bilder hoch.'});photosJson=JSON.stringify(photos);}
  const cents=Math.round(price*100),commission=Math.round(cents*feePercent()/100);
- const changed=db.prepare("UPDATE ride_requests SET service_type=?,pickup=?,destination=?,pickup_plz=?,pickup_state=?,pickup_lat=?,pickup_lon=?,destination_plz=?,travel_date=?,travel_time=?,passengers=?,luggage=?,vehicle_type=?,notes=?,price_cents=?,commission_cents=?,driver_payout_cents=?,garden_task=?,garden_size_m2=?,garden_hours=?,moving_task=?,pickup_floor=?,destination_floor=?,pickup_elevator=?,destination_elevator=?,item_count=?,need_helpers=?,need_van=?,child_count=?,child_seats_needed=?,child_ages_heights=?,child_seat_provider=?,service_description=?,photos_json=?,status='new',admin_approved_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL")
+ const changed=db.prepare("UPDATE ride_requests SET service_type=?,pickup=?,destination=?,pickup_plz=?,pickup_state=?,pickup_lat=?,pickup_lon=?,destination_plz=?,travel_date=?,travel_time=?,passengers=?,luggage=?,vehicle_type=?,notes=?,price_cents=?,commission_cents=?,driver_payout_cents=?,garden_task=?,garden_size_m2=?,garden_hours=?,moving_task=?,pickup_floor=?,destination_floor=?,pickup_elevator=?,destination_elevator=?,item_count=?,need_helpers=?,need_van=?,child_count=?,child_seats_needed=?,child_ages_heights=?,child_seat_provider=?,service_description=?,photos_json=?,status='new',admin_status=NULL,admin_approved_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL")
  .run(type,pickup||'—',(type==='garden'||type==='multi')?(pickup||'—'):destination,pickupInfo?.plz||null,pickupInfo?.state||null,pickupInfo?.lat,pickupInfo?.lon,destinationInfo?.plz||null,date,time,passengers,luggage,type==='airport'?(b.vehicleType||'PKW'):'',clean(b.notes,1000)||null,cents,commission,cents-commission,type==='garden'?gardenTask:null,type==='garden'?gardenSize:null,type==='garden'?gardenHours:null,type==='moving'?movingTask:null,type==='moving'?pickupFloor:null,type==='moving'?destinationFloor:null,type==='moving'?pickupElevator:null,type==='moving'?destinationElevator:null,type==='moving'?itemCount:null,type==='moving'?needHelpers:null,type==='moving'?needVan:null,childCount,childSeats,childAges||null,seatProvider,type==='multi'?desc:null,photosJson,id,req.user.id);
  console.info('[ride-edit] SQL update result',JSON.stringify({pid:process.pid,rideId:id,userId:req.user.id,changes:changed.changes,dbFile:path.resolve(dataDir,'helferfix.sqlite')}));
  if(!changed.changes)return res.status(409).json({error:'Die Anfrage wurde inzwischen angenommen oder geändert.'});
@@ -767,7 +767,7 @@ app.post('/api/rides/:id/customer-cancel',requireRole('customer'),(req,res)=>{
  const id=Number(req.params.id),ride=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
  if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
  if(!['new','quoted'].includes(ride.status)||ride.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Stornierung nur über den Support möglich.'});
- const result=db.prepare("UPDATE ride_requests SET status='cancelled',assigned_driver_id=NULL,accepted_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL").run(id,req.user.id);
+ const result=db.prepare("UPDATE ride_requests SET status='cancelled',admin_status=NULL,assigned_driver_id=NULL,accepted_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL").run(id,req.user.id);
  if(!result.changes)return res.status(409).json({error:'Die Anfrage wurde inzwischen angenommen oder geändert.'});
  db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status) VALUES(?,?,?,'customer_cancel',?,'cancelled')").run(id,req.user.id,'customer',ride.status);
  notifyRideStatus(ride,'cancelled',req.user.id);
@@ -784,7 +784,7 @@ app.post('/api/rides/:id/repost',requireRole('customer'),(req,res)=>{
  const ride=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
  if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
  if(!['cancelled'].includes(ride.status))return res.status(409).json({error:'Nur stornierte Anfragen können erneut eingereicht werden.'});
- const result=db.prepare("UPDATE ride_requests SET status='new',assigned_driver_id=NULL,accepted_at=NULL,admin_approved_at=NULL WHERE id=? AND customer_id=? AND status='cancelled'").run(id,req.user.id);
+ const result=db.prepare("UPDATE ride_requests SET status='new',admin_status=NULL,assigned_driver_id=NULL,accepted_at=NULL,admin_approved_at=NULL WHERE id=? AND customer_id=? AND status='cancelled'").run(id,req.user.id);
  if(!result.changes)return res.status(409).json({error:'Anfrage wurde zwischenzeitlich geändert.'});
  res.json({message:'Anfrage erneut eingereicht und wartet auf Admin-Freigabe.'});
 });
@@ -805,7 +805,7 @@ app.post('/api/rides/:id/accept',requireRole('driver'),(req,res)=>{
   const expectedPayout=Number(req.body?.payoutCents);
   const actualPayout=Number.isInteger(ride.driver_payout_cents)?ride.driver_payout_cents:ride.price_cents-(Number.isInteger(ride.commission_cents)?ride.commission_cents:Math.round(ride.price_cents*feePercent()/100));
   if(!Number.isInteger(expectedPayout)||expectedPayout!==actualPayout)return null;
-  const result=db.prepare("UPDATE ride_requests SET status='accepted',assigned_driver_id=?,accepted_at=CURRENT_TIMESTAMP WHERE id=? AND status='quoted' AND assigned_driver_id IS NULL").run(req.user.id,id);
+  const result=db.prepare("UPDATE ride_requests SET status='accepted',admin_status=NULL,assigned_driver_id=?,accepted_at=CURRENT_TIMESTAMP WHERE id=? AND status='quoted' AND assigned_driver_id IS NULL").run(req.user.id,id);
   if(!result.changes)return false;
   return true;
  });
