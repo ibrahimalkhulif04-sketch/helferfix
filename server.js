@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS ride_requests (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  customer_id INTEGER NOT NULL REFERENCES users(id),
  service_type TEXT NOT NULL DEFAULT 'airport', pickup TEXT NOT NULL,
- destination TEXT NOT NULL, travel_date TEXT, travel_time TEXT,
+ destination TEXT NOT NULL, pickup_plz TEXT, pickup_state TEXT, pickup_lat REAL, pickup_lon REAL, destination_plz TEXT, travel_date TEXT, travel_time TEXT,
  passengers INTEGER NOT NULL DEFAULT 2, luggage INTEGER NOT NULL DEFAULT 2,
  vehicle_type TEXT NOT NULL DEFAULT 'PKW', notes TEXT,
  status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','quoted','accepted','cancelled','completed')),
@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
  delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_ride_id ON chat_messages(ride_request_id, id);
+CREATE TABLE IF NOT EXISTS admin_chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, participant_user_id INTEGER NOT NULL REFERENCES users(id), sender_user_id INTEGER NOT NULL REFERENCES users(id), message TEXT NOT NULL CHECK(length(message) BETWEEN 1 AND 2000), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_admin_chat_thread ON admin_chat_messages(ride_request_id,participant_user_id,id);
 CREATE TABLE IF NOT EXISTS chat_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_chat_notifications_recipient ON chat_notifications(recipient_id, read_at, id);
 CREATE TABLE IF NOT EXISTS app_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ride_request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('message','status')), status TEXT, message_id INTEGER REFERENCES chat_messages(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT);
@@ -77,6 +79,10 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user
 
 const userColumns = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
 if (!userColumns.includes('notify_new_requests')) db.exec('ALTER TABLE users ADD COLUMN notify_new_requests INTEGER NOT NULL DEFAULT 0');
+if (!userColumns.includes('phone_encrypted')) db.exec('ALTER TABLE users ADD COLUMN phone_encrypted TEXT');
+if (!userColumns.includes('name_changed_at')) db.exec('ALTER TABLE users ADD COLUMN name_changed_at TEXT');
+if (!userColumns.includes('ban_until')) db.exec('ALTER TABLE users ADD COLUMN ban_until TEXT');
+if (!userColumns.includes('ban_reason')) db.exec('ALTER TABLE users ADD COLUMN ban_reason TEXT');
 
 // Safe, additive migration: add delivery and read receipts without changing existing messages or accounts.
 const chatMessageColumns = db.prepare('PRAGMA table_info(chat_messages)').all().map(c => c.name);
@@ -85,10 +91,27 @@ if (!chatMessageColumns.includes('read_at')) db.exec('ALTER TABLE chat_messages 
 
 // Safe, additive migration: old accounts, requests and quote history remain in place.
 const rideColumns = db.prepare('PRAGMA table_info(ride_requests)').all().map(c => c.name);
+for (const [column, definition] of Object.entries({pickup_plz:'TEXT',pickup_state:'TEXT',pickup_lat:'REAL',pickup_lon:'REAL',destination_plz:'TEXT'})) if(!rideColumns.includes(column)) db.exec(`ALTER TABLE ride_requests ADD COLUMN ${column} ${definition}`);
 if (!rideColumns.includes('price_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN price_cents INTEGER');
 if (!rideColumns.includes('assigned_driver_id')) db.exec('ALTER TABLE ride_requests ADD COLUMN assigned_driver_id INTEGER REFERENCES users(id)');
 if (!rideColumns.includes('admin_approved_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_approved_at TEXT');
 if (!rideColumns.includes('accepted_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN accepted_at TEXT');
+if (!rideColumns.includes('service_stage')) db.exec("ALTER TABLE ride_requests ADD COLUMN service_stage TEXT NOT NULL DEFAULT 'pending'");
+if (!rideColumns.includes('service_started_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_started_at TEXT');
+if (!rideColumns.includes('service_completed_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_completed_at TEXT');
+if (!rideColumns.includes('service_confirmed_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_confirmed_at TEXT');
+if (!rideColumns.includes('service_disputed_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_disputed_at TEXT');
+if (!rideColumns.includes('service_dispute_reason')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_dispute_reason TEXT');
+if (!rideColumns.includes('service_dispute_deadline_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_dispute_deadline_at TEXT');
+if (!rideColumns.includes('service_reminder_sent_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN service_reminder_sent_at TEXT');
+if (!rideColumns.includes('dispute_status')) db.exec("ALTER TABLE ride_requests ADD COLUMN dispute_status TEXT NOT NULL DEFAULT 'none'");
+if (!rideColumns.includes('dispute_updated_at')) db.exec('ALTER TABLE ride_requests ADD COLUMN dispute_updated_at TEXT');
+if (!rideColumns.includes('admin_resolution_note')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_resolution_note TEXT');
+if (!rideColumns.includes('dispute_driver_id')) db.exec('ALTER TABLE ride_requests ADD COLUMN dispute_driver_id INTEGER REFERENCES users(id)');
+if (!rideColumns.includes('admin_status')) db.exec('ALTER TABLE ride_requests ADD COLUMN admin_status TEXT');
+db.exec("UPDATE ride_requests SET admin_status=NULL WHERE admin_status='new' AND status<>'new'");
+const notificationColumns = db.prepare('PRAGMA table_info(app_notifications)').all().map(c => c.name);
+if (!notificationColumns.includes('admin_message_id')) db.exec('ALTER TABLE app_notifications ADD COLUMN admin_message_id INTEGER REFERENCES admin_chat_messages(id) ON DELETE CASCADE');
 if (!rideColumns.includes('commission_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN commission_cents INTEGER');
 if (!rideColumns.includes('driver_payout_cents')) db.exec('ALTER TABLE ride_requests ADD COLUMN driver_payout_cents INTEGER');
 const existingRideColumns = new Set(rideColumns);
@@ -103,6 +126,43 @@ for (const [column, definition] of Object.entries({
  if (!existingRideColumns.has(column)) { db.exec(`ALTER TABLE ride_requests ADD COLUMN ${column} ${definition}`); existingRideColumns.add(column); }
 }
 
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS plz_cache (plz TEXT PRIMARY KEY, locality TEXT NOT NULL, state TEXT NOT NULL, lat REAL, lon REAL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS provider_service_areas (
+ user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ base_plz TEXT NOT NULL,
+ radius_km INTEGER NOT NULL DEFAULT 25 CHECK(radius_km IN (10,25,50,100)),
+ states_json TEXT NOT NULL DEFAULT '[]',
+ postal_codes_json TEXT NOT NULL DEFAULT '[]',
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS ratings (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ ride_request_id INTEGER NOT NULL,
+ from_user_id INTEGER NOT NULL,
+ to_user_id INTEGER NOT NULL,
+ stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5),
+ comment TEXT,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(ride_request_id,from_user_id),
+ CHECK(from_user_id <> to_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ratings_to_user ON ratings(to_user_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ratings_from_user ON ratings(from_user_id,created_at DESC);
+`);
+
+// Resolve German postal codes and cache locality/state plus postcode-centre coordinates.
+async function resolveGermanPlz(plz) {
+ const code=String(plz||'').trim(); if(!/^\d{5}$/.test(code)) return null;
+ const cached=db.prepare('SELECT plz,locality,state,lat,lon FROM plz_cache WHERE plz=?').get(code); if(cached)return cached;
+ let response;try{response=await fetch('https://openplzapi.org/de/Localities?postalCode='+encodeURIComponent(code)+'&page=1&pageSize=20',{headers:{accept:'application/json'},signal:AbortSignal.timeout(7000)});}catch{return null;}
+ if(!response.ok)return null; const rows=await response.json(); if(!Array.isArray(rows)||!rows.length)return null;
+ const row=rows[0],locality=String(row.name||row.locality||row.municipality?.name||'').trim(),state=String(row.federalState?.name||row.federalstate?.name||row.state||'').trim(); if(!locality||!state)return null;
+ let lat=null,lon=null; try { const url='https://nominatim.openstreetmap.org/search?'+new URLSearchParams({postalcode:code,country:'Germany',format:'jsonv2',limit:'1'}); const geo=await fetch(url,{headers:{'User-Agent':'HelferFix/1.0 (postal-code lookup; support@helferfix.de)','Accept-Language':'de'},signal:AbortSignal.timeout(7000)}); if(geo.ok){const items=await geo.json();if(items[0]){lat=Number(items[0].lat);lon=Number(items[0].lon);if(!Number.isFinite(lat)||!Number.isFinite(lon)){lat=null;lon=null;}}}}catch{}
+ db.prepare('INSERT OR REPLACE INTO plz_cache(plz,locality,state,lat,lon,updated_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)').run(code,locality,state,lat,lon); return {plz:code,locality,state,lat,lon};
+}
+function distanceKm(a,b){const rad=n=>n*Math.PI/180,dLat=rad(b.lat-a.lat),dLon=rad(b.lon-a.lon),x=Math.sin(dLat/2)**2+Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLon/2)**2;return 6371*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
 async function ensureAdmin() {
  const email = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
  const password = process.env.ADMIN_PASSWORD || '';
@@ -153,9 +213,27 @@ app.use((req,res,next)=>{
 });
 const emailOk = s => typeof s === 'string' && s.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 const clean = (v, max=180) => typeof v === 'string' ? v.trim().slice(0,max) : '';
+// Phone numbers are encrypted at rest; only the authenticated account owner can decrypt them.
+const phoneEncryptionKey = crypto.createHash('sha256').update(String(process.env.PHONE_ENCRYPTION_KEY || process.env.SESSION_SECRET || 'development-only-secret-change-me-now-please')).digest();
+function encryptPhone(value) {
+ if (!value) return null;
+ const iv = crypto.randomBytes(12);
+ const cipher = crypto.createCipheriv('aes-256-gcm', phoneEncryptionKey, iv);
+ const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+ return [iv.toString('base64'), cipher.getAuthTag().toString('base64'), encrypted.toString('base64')].join('.');
+}
+function decryptPhone(value) {
+ if (!value) return '';
+ try {
+  const [iv, tag, encrypted] = value.split('.');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', phoneEncryptionKey, Buffer.from(iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(tag, 'base64'));
+  return Buffer.concat([decipher.update(Buffer.from(encrypted, 'base64')), decipher.final()]).toString('utf8');
+ } catch { return ''; }
+}
 function currentUser(req) {
  if (!req.session.userId) return null;
- return db.prepare('SELECT id,name,email,role,created_at,active,notify_new_requests FROM users WHERE id=?').get(req.session.userId) || null;
+ return db.prepare('SELECT id,name,email,role,created_at,active,notify_new_requests,ban_until,ban_reason FROM users WHERE id=?').get(req.session.userId) || null;
 }
 function requireAuth(req,res,next) {
  const user=currentUser(req); if (!user || !user.active) return res.status(401).json({error:'Bitte melde dich an.'}); req.user=user; next();
@@ -191,9 +269,9 @@ if (webPush && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
  }
 }
 const pushText = {
- de: { message: 'Du hast eine neue Nachricht in HelferFix.', status: s => s==='new_request'?'Ein neuer Auftrag ist verfügbar. Öffne HelferFix, um die Anfrage anzusehen.':`Der Status deiner Anfrage wurde geändert: ${({new:'Wartet auf Admin-Freigabe',quoted:'Freigegeben – wartet auf Dienstleister',accepted:'Angenommen',cancelled:'Storniert',completed:'Abgeschlossen'}[s]||s)}.` },
- ar: { message: 'وصلتك رسالة جديدة في HelferFix.', status: s => s==='new_request'?'يتوفر طلب خدمة جديد. افتح HelferFix للاطلاع عليه.':`تم تغيير حالة طلبك: ${({new:'بانتظار موافقة المسؤول',quoted:'تمت الموافقة – بانتظار مقدم الخدمة',accepted:'تم قبول الطلب',cancelled:'ملغى',completed:'مكتمل'}[s]||s)}.` },
- en: { message: 'You have a new message in HelferFix.', status: s => s==='new_request'?'A new service request is available. Open HelferFix to view it.':`Your request status changed: ${({new:'Waiting for admin approval',quoted:'Approved – waiting for a provider',accepted:'Accepted',cancelled:'Cancelled',completed:'Completed'}[s]||s)}.` }
+ de: { message: 'Du hast eine neue Nachricht in HelferFix.', status: s => s==='service_reminder'?'Erinnerung: Bitte bestätige die abgeschlossene Leistung oder melde innerhalb der Frist ein Problem.':s==='new_request'?'Ein neuer Auftrag ist verfügbar. Öffne HelferFix, um die Anfrage anzusehen.':`Der Status deiner Anfrage wurde geändert: ${({new:'Wartet auf Admin-Freigabe',quoted:'Freigegeben – wartet auf Dienstleister',accepted:'Angenommen',cancelled:'Storniert',completed:'Abgeschlossen'}[s]||s)}.` },
+ ar: { message: 'وصلتك رسالة جديدة في HelferFix.', status: s => s==='service_reminder'?'تذكير: يرجى تأكيد اكتمال الخدمة أو الإبلاغ عن مشكلة ضمن المهلة.':s==='new_request'?'يتوفر طلب خدمة جديد. افتح HelferFix للاطلاع عليه.':`تم تغيير حالة طلبك: ${({new:'بانتظار موافقة المسؤول',quoted:'تمت الموافقة – بانتظار مقدم الخدمة',accepted:'تم قبول الطلب',cancelled:'ملغى',completed:'مكتمل'}[s]||s)}.` },
+ en: { message: 'You have a new message in HelferFix.', status: s => s==='service_reminder'?'Reminder: Please confirm the completed service or report an issue before the deadline.':s==='new_request'?'A new service request is available. Open HelferFix to view it.':`Your request status changed: ${({new:'Waiting for admin approval',quoted:'Approved – waiting for a provider',accepted:'Accepted',cancelled:'Cancelled',completed:'Completed'}[s]||s)}.` }
 };
 function notificationBody(kind, status, language='de') { const pack=pushText[language]||pushText.de; return kind==='message'?pack.message:pack.status(status); }
 async function sendPushToUser(userId, payload) {
@@ -230,6 +308,19 @@ function notifyRideStatus(ride, status, actorId, extraUserId=null) {
  addUserNotification(ride.customer_id,ride.id,'status',status,null,actorId);
  if (extraUserId && Number(extraUserId)!==Number(ride.customer_id)) addUserNotification(extraUserId,ride.id,'status',status,null,actorId);
 }
+
+// Send one reminder 24 hours after the provider marks a service complete.
+const serviceReminderTimer = setInterval(()=>{
+ try {
+  const due=db.prepare("SELECT id,customer_id FROM ride_requests WHERE status='accepted' AND service_stage='awaiting_customer' AND service_completed_at IS NOT NULL AND service_reminder_sent_at IS NULL AND service_completed_at<=datetime('now','-24 hours')").all();
+  for(const ride of due){
+   const mark=db.prepare("UPDATE ride_requests SET service_reminder_sent_at=CURRENT_TIMESTAMP WHERE id=? AND service_stage='awaiting_customer' AND service_reminder_sent_at IS NULL").run(ride.id);
+   if(mark.changes)addUserNotification(ride.customer_id,ride.id,'status','service_reminder');
+  }
+ } catch(error){console.error('[service-reminder] failed:',error.message);}
+},15*60*1000);
+if(typeof serviceReminderTimer.unref==='function')serviceReminderTimer.unref();
+
 function notifyDriversOfNewRide(ride, actorId=null) {
  if (!ride || ride.status!=='quoted' || ride.assigned_driver_id) return;
  const drivers=db.prepare("SELECT id FROM users WHERE role='driver' AND active=1 AND notify_new_requests=1").all();
@@ -287,6 +378,192 @@ app.patch('/api/driver/notification-preferences',requireRole('driver'),(req,res)
 });
 
 app.get('/api/me',(req,res)=>res.json({user:currentUser(req)}));
+// Private profile endpoints: phone data is never added to public ride, chat, or admin responses.
+app.get('/api/profile',requireRole('customer','driver'),(req,res)=>{
+ const row=db.prepare('SELECT name,email,phone_encrypted FROM users WHERE id=?').get(req.user.id);
+ res.json({profile:{name:row.name,email:row.email,phone:decryptPhone(row.phone_encrypted)}});
+});
+app.patch('/api/profile/name',requireRole('customer','driver'),(req,res)=>{
+ const name=clean(req.body?.name,100);
+ if(name.length<4)return res.status(400).json({error:'Der Name muss mindestens 4 Zeichen haben.'});
+ const row=db.prepare('SELECT name_changed_at FROM users WHERE id=?').get(req.user.id);
+ if(row.name_changed_at){
+  const changedAt=Date.parse(row.name_changed_at.replace(' ','T')+'Z');
+  if(Number.isFinite(changedAt)&&Date.now()-changedAt<90*24*60*60*1000){
+   const nextDate=new Date(changedAt+90*24*60*60*1000);
+   return res.status(429).json({error:'Der Name kann nur alle 90 Tage geändert werden. Nächste Änderung ab '+nextDate.toLocaleDateString('de-DE')+'.'});
+  }
+ }
+ db.prepare('UPDATE users SET name=?,name_changed_at=CURRENT_TIMESTAMP WHERE id=?').run(name,req.user.id);
+ res.json({ok:true,name});
+});
+app.patch('/api/profile/phone',requireRole('customer','driver'),(req,res)=>{
+ const phone=clean(req.body?.phone,30);
+  const digits=phone.replace(/\D/g,'');
+  if(phone && (!/^[+0-9(). \/-]+$/.test(phone) || digits.length<7 || digits.length>20)) return res.status(400).json({error:'Bitte gib eine gültige Telefonnummer ein.'});
+ db.prepare('UPDATE users SET phone_encrypted=? WHERE id=?').run(encryptPhone(phone),req.user.id);
+ res.json({ok:true,phone});
+});
+
+
+// Germany-wide locality search: OpenPLZ municipalities plus Photon/OSM districts and suburbs.
+const localitySearchCache = new Map();
+const localityChoiceCache = new Map();
+const LOCALITY_CACHE_TTL = 10 * 60 * 1000;
+function rememberLocalityChoice(item) {
+ const key=item.postalCode+'|'+item.city.toLocaleLowerCase('de');
+ localityChoiceCache.set(key,{item,expires:Date.now()+LOCALITY_CACHE_TTL});
+ if(localityChoiceCache.size>5000){for(const [k,v] of localityChoiceCache)if(v.expires<Date.now())localityChoiceCache.delete(k);while(localityChoiceCache.size>4000)localityChoiceCache.delete(localityChoiceCache.keys().next().value);}
+}
+async function fetchOpenPlzLocalities(params) {
+ const all=[];
+ for(let page=1;page<=10;page++){
+  params.set('page',String(page));params.set('pageSize','50');
+  const response=await fetch('https://openplzapi.org/de/Localities?'+params.toString(),{headers:{accept:'application/json'},signal:AbortSignal.timeout(7000)});
+  if(!response.ok)throw new Error('OpenPLZ lookup failed');
+  const rows=await response.json();if(!Array.isArray(rows)||!rows.length)break;
+  all.push(...rows);if(rows.length<50)break;
+ }
+ return all;
+}
+async function fetchPhotonLocalities(query) {
+ const params=new URLSearchParams({q:query,countrycode:'DE',lang:'de',limit:'30'});
+ for(const layer of ['city','district','locality'])params.append('layer',layer);
+ const response=await fetch('https://photon.komoot.io/api/?'+params.toString(),{headers:{accept:'application/geo+json'},signal:AbortSignal.timeout(8000)});
+ if(!response.ok)throw new Error('Photon lookup failed');
+ const data=await response.json();
+ return (data.features||[]).map(feature=>{
+  const p=feature.properties||{},coords=feature.geometry?.coordinates||[];
+  const postalCode=String(p.postcode||'').trim(),name=String(p.name||'').trim();
+  const parent=String(p.city||'').trim(),district=String(p.district||'').trim();
+  if(!/^\d{5}$/.test(postalCode)||!name)return null;
+  const suburb=district&&district.toLocaleLowerCase('de')!==name.toLocaleLowerCase('de')?district:(String(p.osm_value||'').toLowerCase()==='district'?name:'');
+  const city=suburb&&parent?suburb+', '+parent:name;
+  const state=String(p.state||'').trim();
+  const lat=Number(coords[1]),lon=Number(coords[0]);
+  return {postalCode,city,state:state||'Deutschland',label:city,lat:Number.isFinite(lat)?lat:null,lon:Number.isFinite(lon)?lon:null,source:'photon'};
+ }).filter(Boolean);
+}
+async function searchGermanLocalities(query) {
+ const q=String(query||'').trim();if(q.length<2||q.length>80)return [];
+ const cacheKey=q.toLocaleLowerCase('de'),cached=localitySearchCache.get(cacheKey);
+ if(cached&&cached.expires>Date.now())return cached.results;
+ const unique=new Map();
+ const add=item=>{
+  if(!/^\d{5}$/.test(item.postalCode)||!item.city||!item.state)return;
+  const key=item.postalCode+'|'+item.city.toLocaleLowerCase('de');
+  if(!unique.has(key))unique.set(key,item);
+  rememberLocalityChoice(unique.get(key));
+ };
+ const tasks=[],openParams=new URLSearchParams();
+ if(/^\d+$/.test(q))openParams.set('postalCode',q.length===5?q:'^'+q);
+ else {const safe=q.replace(/[^A-Za-zÄÖÜäöüß0-9 '-]/g,'').trim();if(safe.length>=2)openParams.set('name','^'+safe);}
+ if(openParams.size)tasks.push(fetchOpenPlzLocalities(openParams).then(rows=>rows.forEach(row=>add({postalCode:String(row.postalcode||row.postalCode||'').trim(),city:String(row.name||'').trim(),state:String(row.federalState?.name||'').trim(),label:String(row.name||'').trim(),source:'openplz'}))));
+ tasks.push(fetchPhotonLocalities(q).then(rows=>rows.forEach(add)));
+ const settled=await Promise.allSettled(tasks);
+ if(!unique.size&&settled.every(x=>x.status==='rejected'))throw new Error('Locality providers unavailable');
+ const results=[...unique.values()].slice(0,80);
+ localitySearchCache.set(cacheKey,{results,expires:Date.now()+2*60*1000});
+ if(localitySearchCache.size>500)localitySearchCache.delete(localitySearchCache.keys().next().value);
+ return results;
+}
+async function resolveSelectedLocality(plz,city) {
+ const code=String(plz||'').trim(),name=String(city||'').trim();
+ if(!/^\d{5}$/.test(code)||!name||name.length>180)return null;
+ const key=code+'|'+name.toLocaleLowerCase('de'),cached=localityChoiceCache.get(key);
+ if(cached&&cached.expires>Date.now())return {plz:code,locality:name,state:cached.item.state,lat:cached.item.lat??null,lon:cached.item.lon??null};
+ const rows=await fetchOpenPlzLocalities(new URLSearchParams({postalCode:code})).catch(()=>[]);
+ const row=rows.find(item=>String(item.postalcode||item.postalCode||'').trim()===code&&String(item.name||'').trim().toLocaleLowerCase('de')===name.toLocaleLowerCase('de'));
+ if(row){let geo=null;try{geo=await resolveGermanPlz(code);}catch{}return {plz:code,locality:String(row.name).trim(),state:String(row.federalState?.name||geo?.state||'').trim(),lat:geo?.lat??null,lon:geo?.lon??null};}
+ const params=new URLSearchParams({q:name+' '+code,countrycode:'DE',lang:'de',limit:'15'});
+ try{
+  const response=await fetch('https://photon.komoot.io/api/?'+params.toString(),{headers:{accept:'application/geo+json'},signal:AbortSignal.timeout(8000)});
+  if(response.ok){
+   const data=await response.json();
+   const feature=(data.features||[]).find(f=>String(f.properties?.postcode||'').trim()===code);
+   if(feature){
+    const p=feature.properties||{},coords=feature.geometry?.coordinates||[];
+    const found=String(p.name||'').trim(),parent=String(p.city||'').trim(),district=String(p.district||'').trim();
+    const display=district&&parent?district+', '+parent:found;
+    if(display.toLocaleLowerCase('de')===name.toLocaleLowerCase('de')||found.toLocaleLowerCase('de')===name.toLocaleLowerCase('de'))return {plz:code,locality:name,state:String(p.state||'').trim(),lat:Number.isFinite(Number(coords[1]))?Number(coords[1]):null,lon:Number.isFinite(Number(coords[0]))?Number(coords[0]):null};
+   }
+  }
+ }catch{}
+ return null;
+}
+app.get('/api/postal-codes/search',rateLimit({windowMs:60*1000,limit:90,standardHeaders:'draft-7',legacyHeaders:false}),async(req,res)=>{
+ try{res.json({results:await searchGermanLocalities(req.query.q)});}
+ catch(error){console.error('[postal-search] lookup failed:',error.message);res.status(503).json({error:'Die Orts- und PLZ-Suche ist momentan nicht verfügbar.'});}
+});
+app.get('/api/postal-codes/:plz',async(req,res)=>{
+ try{const info=await resolveGermanPlz(req.params.plz);if(!info)return res.status(404).json({error:'PLZ nicht gefunden.'});res.json({postalCode:info.plz,city:info.locality,state:info.state});}
+ catch{res.status(503).json({error:'PLZ-Prüfung momentan nicht verfügbar.'});}
+});
+app.get('/api/profile/service-area',requireRole('driver'),(req,res)=>{
+ const row=db.prepare('SELECT base_plz,radius_km,states_json,postal_codes_json FROM provider_service_areas WHERE user_id=?').get(req.user.id);
+ let states=[],postalCodes=[];try{states=JSON.parse(row?.states_json||'[]');}catch{}try{postalCodes=JSON.parse(row?.postal_codes_json||'[]');}catch{}
+ res.json({serviceArea:row?{basePlz:row.base_plz,radiusKm:row.radius_km,states,postalCodes}:{basePlz:'',radiusKm:25,states:[],postalCodes:[]}});
+});
+app.patch('/api/profile/service-area',requireRole('driver'),async(req,res)=>{
+ const basePlz=String(req.body?.basePlz||'').trim(),radiusKm=Number(req.body?.radiusKm);
+ const allowedStates=['Baden-Württemberg','Bayern','Berlin','Brandenburg','Bremen','Hamburg','Hessen','Mecklenburg-Vorpommern','Niedersachsen','Nordrhein-Westfalen','Rheinland-Pfalz','Saarland','Sachsen','Sachsen-Anhalt','Schleswig-Holstein','Thüringen'];
+ const states=Array.isArray(req.body?.states)?[...new Set(req.body.states.filter(x=>allowedStates.includes(x)))]:[];
+ const postalCodes=Array.isArray(req.body?.postalCodes)?[...new Set(req.body.postalCodes.map(x=>String(x).trim()).filter(x=>/^\d{5}$/.test(x)))].slice(0,100):[];
+ if(!/^\d{5}$/.test(basePlz)||![10,25,50,100].includes(radiusKm)||!Array.isArray(req.body?.states)||!Array.isArray(req.body?.postalCodes)||states.length!==req.body.states.length||req.body.postalCodes.some(x=>!/^\d{5}$/.test(String(x).trim())))return res.status(400).json({error:'Bitte gib eine gültige fünfstellige PLZ, einen Radius und gültige Gebiete an.'});
+ const baseInfo=await resolveGermanPlz(basePlz);if(!baseInfo)return res.status(400).json({error:'Basis-PLZ nicht gefunden.'});for(const code of postalCodes)if(!await resolveGermanPlz(code))return res.status(400).json({error:'PLZ '+code+' nicht gefunden.'});
+ db.prepare(`INSERT INTO provider_service_areas(user_id,base_plz,radius_km,states_json,postal_codes_json) VALUES(?,?,?,?,?)
+ ON CONFLICT(user_id) DO UPDATE SET base_plz=excluded.base_plz,radius_km=excluded.radius_km,states_json=excluded.states_json,postal_codes_json=excluded.postal_codes_json,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,basePlz,radiusKm,JSON.stringify(states),JSON.stringify(postalCodes));
+ res.json({ok:true,serviceArea:{basePlz,radiusKm,states,postalCodes}});
+});
+app.get('/api/profile/ratings',requireRole('customer','driver'),(req,res)=>{
+ const received=db.prepare('SELECT r.id,r.ride_request_id,r.stars,r.comment,r.created_at,u.name AS from_name FROM ratings r JOIN users u ON u.id=r.from_user_id WHERE r.to_user_id=? ORDER BY r.created_at DESC').all(req.user.id);
+ const given=db.prepare('SELECT r.id,r.ride_request_id,r.stars,r.comment,r.created_at,u.name AS to_name FROM ratings r JOIN users u ON u.id=r.to_user_id WHERE r.from_user_id=? ORDER BY r.created_at DESC').all(req.user.id);
+ const avg=received.length?received.reduce((n,r)=>n+r.stars,0)/received.length:0;
+ res.json({received,given,average:Number(avg.toFixed(2)),count:received.length});
+});
+app.post('/api/ratings',requireRole('customer','driver'),(req,res)=>{
+ const rideId=Number(req.body?.rideId),stars=Number(req.body?.stars),comment=clean(req.body?.comment,1000);
+ if(!Number.isInteger(rideId)||rideId<1||!Number.isInteger(stars)||stars<1||stars>5)return res.status(400).json({error:'Bitte wähle eine Anfrage und 1 bis 5 Sterne.'});
+ const ride=db.prepare("SELECT id,customer_id,assigned_driver_id,status FROM ride_requests WHERE id=?").get(rideId);
+ if(!ride||ride.status!=='completed')return res.status(409).json({error:'Bewertungen sind nur nach abgeschlossenen Aufträgen möglich.'});
+ const other=req.user.id===ride.customer_id?ride.assigned_driver_id:req.user.id===ride.assigned_driver_id?ride.customer_id:null;
+ if(!other||other===req.user.id)return res.status(403).json({error:'Du bist nicht an diesem Auftrag beteiligt.'});
+ try{db.prepare('INSERT INTO ratings(ride_request_id,from_user_id,to_user_id,stars,comment) VALUES(?,?,?,?,?)').run(rideId,req.user.id,other,stars,comment||null);}
+ catch(e){if(String(e.message).includes('UNIQUE'))return res.status(409).json({error:'Du hast diesen Auftrag bereits bewertet.'});throw e;}
+ res.status(201).json({ok:true});
+});
+app.patch('/api/profile/password',requireRole('customer','driver'),async(req,res)=>{
+ const current=typeof req.body?.currentPassword==='string'?req.body.currentPassword:'';
+ const next=typeof req.body?.newPassword==='string'?req.body.newPassword:'';
+ const confirmation=typeof req.body?.confirmPassword==='string'?req.body.confirmPassword:'';
+ if(next.length<8||next.length>200)return res.status(400).json({error:'Das neue Passwort muss mindestens 8 Zeichen haben.'});
+ if(next!==confirmation)return res.status(400).json({error:'Die neuen Passwörter stimmen nicht überein.'});
+ const row=db.prepare('SELECT password_hash FROM users WHERE id=?').get(req.user.id);
+ if(!current||!(await bcrypt.compare(current,row.password_hash)))return res.status(401).json({error:'Das aktuelle Passwort ist nicht korrekt.'});
+ const hash=await bcrypt.hash(next,12);db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hash,req.user.id);
+ res.json({ok:true});
+});
+app.post('/api/account/delete',requireRole('customer','driver'),async(req,res)=>{
+ const password=typeof req.body?.password==='string'?req.body.password:'';
+ const row=db.prepare('SELECT id,password_hash,role FROM users WHERE id=?').get(req.user.id);
+ if(!password||!(await bcrypt.compare(password,row.password_hash)))return res.status(401).json({error:'Das Passwort ist nicht korrekt.'});
+ const id=req.user.id;
+ const tx=db.transaction(()=>{
+  db.prepare('DELETE FROM push_subscriptions WHERE user_id=?').run(id);
+  db.prepare('DELETE FROM chat_notifications WHERE recipient_id=?').run(id);
+  db.prepare('DELETE FROM app_notifications WHERE recipient_id=?').run(id);
+  db.prepare('DELETE FROM password_reset_tokens WHERE user_id=?').run(id);
+  db.prepare('DELETE FROM ratings WHERE from_user_id=? OR to_user_id=?').run(id,id);
+  db.prepare('UPDATE ride_audit_log SET actor_user_id=NULL WHERE actor_user_id=?').run(id);
+  db.prepare('DELETE FROM provider_service_areas WHERE user_id=?').run(id);
+  const anonEmail='deleted-'+id+'@account.invalid';
+  const randomHash=bcrypt.hashSync(crypto.randomBytes(48).toString('hex'),12);
+  db.prepare("UPDATE users SET name='Gelöschtes Konto',email=?,password_hash=?,phone_encrypted=NULL,notify_new_requests=0,active=0 WHERE id=?").run(anonEmail,randomHash,id);
+ });
+ tx();
+ req.session.destroy(()=>{res.clearCookie('connect.sid');res.json({ok:true,message:'Das Konto wurde deaktiviert und persönliche Kontaktdaten wurden entfernt. Gesetzlich erforderliche Auftragsdaten bleiben anonymisiert erhalten.'});});
+});
+
 app.post('/api/auth/register',async(req,res)=>{
  const name=clean(req.body.name,100),email=clean(req.body.email,254).toLowerCase(),password=typeof req.body.password==='string'?req.body.password:'',role=req.body.role;
  if(name.length<4||!emailOk(email)||password.length<8||password.length>200||password!==String(req.body.confirmPassword||'')||!['customer','driver'].includes(role))return res.status(400).json({error:'Bitte Name, gültige E-Mail, Passwort (mind. 8 Zeichen) und passende Bestätigung und Rolle korrekt angeben.'});
@@ -372,10 +649,14 @@ app.post('/api/auth/login',async(req,res)=>{
 app.post('/api/auth/logout',(req,res)=>req.session.destroy(()=>{res.clearCookie('connect.sid');res.json({ok:true,message:'Abgemeldet.'});}));
 
 // Customer requests: service-specific details are saved; all requests wait for admin approval.
-app.post('/api/rides',requireRole('customer'),(req,res)=>{
+app.post('/api/rides',requireRole('customer'),async(req,res)=>{
+ const ban=db.prepare('SELECT ban_until FROM users WHERE id=?').get(req.user.id);if(ban?.ban_until&&Date.parse(String(ban.ban_until).replace(' ','T')+'Z')>Date.now())return res.status(403).json({error:'Dein Konto ist bis '+ban.ban_until+' für neue Anfragen gesperrt.'});
  const serviceType=['airport','garden','moving','multi'].includes(req.body.serviceType)?req.body.serviceType:'airport';
  const pickup=clean(req.body.pickup,180) || (serviceType==='multi'?'—':'');
  const destination=clean(req.body.destination,180) || (serviceType==='garden'||serviceType==='multi'?pickup:'');
+ const pickupPlz=clean(req.body.pickupPlz,5),destinationPlz=clean(req.body.destinationPlz,5);
+ const pickupInfo=serviceType==='multi'?null:await resolveSelectedLocality(pickupPlz,pickup);
+ const destinationInfo=(serviceType==='airport'||serviceType==='moving')?await resolveSelectedLocality(destinationPlz,destination):null;
  const serviceDescription=clean(req.body.serviceDescription,2000);
  const gardenHours=req.body.gardenHours===''||req.body.gardenHours==null?null:Number(req.body.gardenHours);
  const travelDate=clean(req.body.travelDate,10),travelTime=clean(req.body.travelTime,5);
@@ -397,7 +678,7 @@ app.post('/api/rides',requireRole('customer'),(req,res)=>{
  const childSeatsNeeded=Number(req.body.childSeatsNeeded||0);
  const childAgesHeights=clean(req.body.childAgesHeights,200);
  const childSeatProvider=['customer','driver','none'].includes(req.body.childSeatProvider)?req.body.childSeatProvider:'none';
- if((serviceType!=='multi'&&(!pickup||pickup.length<2))||((serviceType==='airport'||serviceType==='moving')&&(!destination||destination.length<2)))return res.status(400).json({error:'Bitte Start/Ort und – falls erforderlich – Ziel korrekt angeben.'});
+ if(!pickup||pickup.length<2||(serviceType!=='multi'&&!pickupInfo)||((serviceType==='airport'||serviceType==='moving')&&(!destination||destination.length<2||!destinationInfo)))return res.status(400).json({error:'Bitte wähle für Start und Ziel jeweils einen passenden Ort mit PLZ aus der Vorschlagsliste.'});
  if(!travelDate||!/^\d{4}-\d{2}-\d{2}$/.test(travelDate)||!travelTime||!/^([01]\d|2[0-3]):[0-5]\d$/.test(travelTime))return res.status(400).json({error:'Bitte Datum und Uhrzeit angeben.'});
  // Reject past dates/times using the local German time zone, regardless of the server's UTC clock.
  const berlinNow = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date()).replace(' ', 'T');
@@ -415,11 +696,11 @@ app.post('/api/rides',requireRole('customer'),(req,res)=>{
  if(travelDate&&!/^\d{4}-\d{2}-\d{2}$/.test(travelDate))return res.status(400).json({error:'Ungültiges Datum.'});
  const cents=Math.round(price*100),pct=feePercent(),commission=Math.round(cents*pct/100);
  const result=db.prepare(`INSERT INTO ride_requests (
- customer_id,service_type,pickup,destination,travel_date,travel_time,passengers,luggage,vehicle_type,notes,
+ customer_id,service_type,pickup,destination,pickup_plz,pickup_state,pickup_lat,pickup_lon,destination_plz,travel_date,travel_time,passengers,luggage,vehicle_type,notes,
  price_cents,commission_cents,driver_payout_cents,status,garden_task,garden_size_m2,moving_task,pickup_floor,destination_floor,
  pickup_elevator,destination_elevator,item_count,need_helpers,need_van,child_count,child_seats_needed,child_ages_heights,child_seat_provider,photos_json,service_description,garden_hours
- ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
- .run(req.user.id,serviceType,pickup,destination,travelDate,travelTime,
+ ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+ .run(req.user.id,serviceType,pickup,destination,pickupInfo?.plz||null,pickupInfo?.state||null,pickupInfo?.lat,pickupInfo?.lon,destinationInfo?.plz||null,travelDate,travelTime,
   serviceType==='airport'?passengers:0,serviceType==='airport'?luggage:0,serviceType==='airport'?vehicleType:'',notes||null,
   cents,commission,cents-commission,gardenTask,gardenSize,movingTask,pickupFloor||null,destinationFloor||null,
   pickupElevator,destinationElevator,itemCount,needHelpers,needVan,
@@ -441,7 +722,8 @@ app.get('/api/rides/:id/edit',requireRole('customer'),(req,res)=>{
  if(!['new','quoted'].includes(ride.status)||ride.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Änderung nur über den Support möglich.'});
  res.json({ride:withCustomerMoney(ride)});
 });
-app.patch('/api/rides/:id',requireRole('customer'),(req,res)=>{
+app.patch('/api/rides/:id',requireRole('customer'),async(req,res)=>{
+ const ban=db.prepare('SELECT ban_until FROM users WHERE id=?').get(req.user.id);if(ban?.ban_until&&Date.parse(String(ban.ban_until).replace(' ','T')+'Z')>Date.now())return res.status(403).json({error:'Dein Konto ist bis '+ban.ban_until+' für neue Anfragen gesperrt.'});
  const id=Number(req.params.id),b=req.body||{};
  console.info('[ride-edit] handler entered',JSON.stringify({pid:process.pid,dbFile:path.resolve(dataDir,'helferfix.sqlite'),rideId:id,userId:req.user.id,bodyKeys:Object.keys(b).sort(),serviceType:typeof b.serviceType==='string'?b.serviceType:'',travelDate:typeof b.travelDate==='string'?b.travelDate:'',travelTime:typeof b.travelTime==='string'?b.travelTime:'',priceEuro:typeof b.priceEuro==='number'||typeof b.priceEuro==='string'?String(b.priceEuro).slice(0,20):typeof b.priceEuro}));
  const old=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
@@ -450,8 +732,14 @@ app.patch('/api/rides/:id',requireRole('customer'),(req,res)=>{
  if(!['new','quoted'].includes(old.status)||old.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Änderung nur über den Support möglich.'});
  const type=['airport','garden','moving','multi'].includes(b.serviceType)?b.serviceType:null;
  const pickup=clean(b.pickup,180),destination=clean(b.destination,180),date=clean(b.travelDate,10),time=clean(b.travelTime,5),price=Number(b.priceEuro);
+ const pickupPlz=clean(b.pickupPlz,5),destinationPlz=clean(b.destinationPlz,5);
+ // Reuse the saved, verified place when it has not changed. Editing another field must not depend on an external postal lookup.
+ const samePickup=pickupPlz===String(old.pickup_plz||'')&&pickup===String(old.pickup||'');
+ const sameDestination=destinationPlz===String(old.destination_plz||'')&&destination===String(old.destination||'');
+ const pickupInfo=type==='multi'?null:(samePickup?{plz:old.pickup_plz,state:old.pickup_state,lat:old.pickup_lat,lon:old.pickup_lon}:await resolveSelectedLocality(pickupPlz,pickup));
+ const destinationInfo=(type==='airport'||type==='moving')?(sameDestination?{plz:old.destination_plz,state:null,lat:null,lon:null}:await resolveSelectedLocality(destinationPlz,destination)):null;
  const now=new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date()).replace(' ','T');
- if(!type||(!pickup&&type!=='multi')||((type==='airport'||type==='moving')&&destination.length<2)||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)||`${date}T${time}`<now||!Number.isFinite(price)||price<1||price>10000||Math.round(price*100)!==price*100)return res.status(400).json({error:'Bitte prüfe Dienstleistung, Start, Ziel, Datum, Uhrzeit und Preis.'});
+ if(!type||!pickup||pickup.length<2||(type!=='multi'&&!pickupInfo)||((type==='airport'||type==='moving')&&(destination.length<2||!destinationInfo))||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)||`${date}T${time}`<now||!Number.isFinite(price)||price<1||price>10000||Math.round(price*100)!==price*100)return res.status(400).json({error:'Bitte prüfe Dienstleistung, Start, Ziel, Datum, Uhrzeit und Preis.'});
  const desc=clean(b.serviceDescription,2000),gardenTask=['lawn','hedge','cleaning','other'].includes(b.gardenTask)?b.gardenTask:null;
  const gardenSize=b.gardenSizeM2===''||b.gardenSizeM2==null?null:Number(b.gardenSizeM2),gardenHours=b.gardenHours===''||b.gardenHours==null?null:Number(b.gardenHours);
  const movingTask=['move','assembly','both'].includes(b.movingTask)?b.movingTask:null;
@@ -469,8 +757,8 @@ app.patch('/api/rides/:id',requireRole('customer'),(req,res)=>{
  const photos=Array.isArray(b.photos)?b.photos:null;let photosJson=old.photos_json;
  if(photos&&photos.length){if(photos.length>3||photos.some(p=>!p||typeof p.name!=='string'||p.name.length>120||!['image/jpeg','image/png','image/webp'].includes(p.type)||typeof p.data!=='string'||p.data.length>1400000||!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(p.data)))return res.status(400).json({error:'Bitte lade höchstens 3 gültige Bilder hoch.'});photosJson=JSON.stringify(photos);}
  const cents=Math.round(price*100),commission=Math.round(cents*feePercent()/100);
- const changed=db.prepare("UPDATE ride_requests SET service_type=?,pickup=?,destination=?,travel_date=?,travel_time=?,passengers=?,luggage=?,vehicle_type=?,notes=?,price_cents=?,commission_cents=?,driver_payout_cents=?,garden_task=?,garden_size_m2=?,garden_hours=?,moving_task=?,pickup_floor=?,destination_floor=?,pickup_elevator=?,destination_elevator=?,item_count=?,need_helpers=?,need_van=?,child_count=?,child_seats_needed=?,child_ages_heights=?,child_seat_provider=?,service_description=?,photos_json=?,status='new',admin_approved_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL")
- .run(type,pickup||'—',(type==='garden'||type==='multi')?(pickup||'—'):destination,date,time,passengers,luggage,type==='airport'?(b.vehicleType||'PKW'):'',clean(b.notes,1000)||null,cents,commission,cents-commission,type==='garden'?gardenTask:null,type==='garden'?gardenSize:null,type==='garden'?gardenHours:null,type==='moving'?movingTask:null,type==='moving'?pickupFloor:null,type==='moving'?destinationFloor:null,type==='moving'?pickupElevator:null,type==='moving'?destinationElevator:null,type==='moving'?itemCount:null,type==='moving'?needHelpers:null,type==='moving'?needVan:null,childCount,childSeats,childAges||null,seatProvider,type==='multi'?desc:null,photosJson,id,req.user.id);
+ const changed=db.prepare("UPDATE ride_requests SET service_type=?,pickup=?,destination=?,pickup_plz=?,pickup_state=?,pickup_lat=?,pickup_lon=?,destination_plz=?,travel_date=?,travel_time=?,passengers=?,luggage=?,vehicle_type=?,notes=?,price_cents=?,commission_cents=?,driver_payout_cents=?,garden_task=?,garden_size_m2=?,garden_hours=?,moving_task=?,pickup_floor=?,destination_floor=?,pickup_elevator=?,destination_elevator=?,item_count=?,need_helpers=?,need_van=?,child_count=?,child_seats_needed=?,child_ages_heights=?,child_seat_provider=?,service_description=?,photos_json=?,status='new',admin_status=NULL,admin_approved_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL")
+ .run(type,pickup||'—',(type==='garden'||type==='multi')?(pickup||'—'):destination,pickupInfo?.plz||null,pickupInfo?.state||null,pickupInfo?.lat,pickupInfo?.lon,destinationInfo?.plz||null,date,time,passengers,luggage,type==='airport'?(b.vehicleType||'PKW'):'',clean(b.notes,1000)||null,cents,commission,cents-commission,type==='garden'?gardenTask:null,type==='garden'?gardenSize:null,type==='garden'?gardenHours:null,type==='moving'?movingTask:null,type==='moving'?pickupFloor:null,type==='moving'?destinationFloor:null,type==='moving'?pickupElevator:null,type==='moving'?destinationElevator:null,type==='moving'?itemCount:null,type==='moving'?needHelpers:null,type==='moving'?needVan:null,childCount,childSeats,childAges||null,seatProvider,type==='multi'?desc:null,photosJson,id,req.user.id);
  console.info('[ride-edit] SQL update result',JSON.stringify({pid:process.pid,rideId:id,userId:req.user.id,changes:changed.changes,dbFile:path.resolve(dataDir,'helferfix.sqlite')}));
  if(!changed.changes)return res.status(409).json({error:'Die Anfrage wurde inzwischen angenommen oder geändert.'});
  db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,'customer_edit',?,?,?)").run(id,req.user.id,'customer',old.status,'new',JSON.stringify({service_type:type,price_cents:cents}));
@@ -483,7 +771,7 @@ app.post('/api/rides/:id/customer-cancel',requireRole('customer'),(req,res)=>{
  const id=Number(req.params.id),ride=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
  if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
  if(!['new','quoted'].includes(ride.status)||ride.assigned_driver_id)return res.status(409).json({error:'Nach Annahme durch einen Dienstleister ist eine Stornierung nur über den Support möglich.'});
- const result=db.prepare("UPDATE ride_requests SET status='cancelled',assigned_driver_id=NULL,accepted_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL").run(id,req.user.id);
+ const result=db.prepare("UPDATE ride_requests SET status='cancelled',admin_status=NULL,assigned_driver_id=NULL,accepted_at=NULL WHERE id=? AND customer_id=? AND status IN ('new','quoted') AND assigned_driver_id IS NULL").run(id,req.user.id);
  if(!result.changes)return res.status(409).json({error:'Die Anfrage wurde inzwischen angenommen oder geändert.'});
  db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status) VALUES(?,?,?,'customer_cancel',?,'cancelled')").run(id,req.user.id,'customer',ride.status);
  notifyRideStatus(ride,'cancelled',req.user.id);
@@ -495,21 +783,26 @@ app.get('/api/rides/mine',requireRole('customer'),(req,res)=>{
  res.json({rides:rides.map(withCustomerMoney)});
 });
 app.post('/api/rides/:id/repost',requireRole('customer'),(req,res)=>{
+ const ban=db.prepare('SELECT ban_until FROM users WHERE id=?').get(req.user.id);if(ban?.ban_until&&Date.parse(String(ban.ban_until).replace(' ','T')+'Z')>Date.now())return res.status(403).json({error:'Dein Konto ist bis '+ban.ban_until+' für neue Anfragen gesperrt.'});
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
  const ride=db.prepare('SELECT * FROM ride_requests WHERE id=? AND customer_id=?').get(id,req.user.id);
  if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
- if(!['cancelled'].includes(ride.status))return res.status(409).json({error:'Nur stornierte Anfragen können erneut eingereicht werden.'});
- const result=db.prepare("UPDATE ride_requests SET status='new',assigned_driver_id=NULL,accepted_at=NULL,admin_approved_at=NULL WHERE id=? AND customer_id=? AND status='cancelled'").run(id,req.user.id);
+ if(ride.status!=='cancelled')return res.status(409).json({error:'Nur stornierte Anfragen können erneut eingereicht werden.'});
+  if(['closed','rejected'].includes(String(ride.admin_status||''))||['resolved','rejected'].includes(String(ride.dispute_status||'')))return res.status(403).json({error:'Diese Anfrage wurde vom Admin geschlossen und kann nicht erneut eingereicht werden. Bitte erstelle eine neue Anfrage.'});
+ const result=db.prepare("UPDATE ride_requests SET status='new',admin_status=NULL,assigned_driver_id=NULL,accepted_at=NULL,admin_approved_at=NULL WHERE id=? AND customer_id=? AND status='cancelled'").run(id,req.user.id);
  if(!result.changes)return res.status(409).json({error:'Anfrage wurde zwischenzeitlich geändert.'});
  res.json({message:'Anfrage erneut eingereicht und wartet auf Admin-Freigabe.'});
 });
 // Drivers see only admin-approved requests. Price is fixed; there is no driver price-offer route.
-app.get('/api/rides/open',requireRole('driver'),(req,res)=>{
- const rides=db.prepare("SELECT r.* FROM ride_requests r WHERE r.status='quoted' AND r.assigned_driver_id IS NULL AND EXISTS (SELECT 1 FROM users c WHERE c.id=r.customer_id AND c.active=1) ORDER BY r.id DESC").all();
- res.json({rides:rides.map(withDriverMoney)});
+app.get('/api/rides/open',requireRole('driver'),async(req,res)=>{
+ const rides=db.prepare("SELECT r.* FROM ride_requests r WHERE r.status='quoted' AND r.assigned_driver_id IS NULL AND (r.admin_status IS NULL OR r.admin_status='approved') AND EXISTS (SELECT 1 FROM users c WHERE c.id=r.customer_id AND c.active=1) ORDER BY r.id DESC").all();
+ const area=db.prepare('SELECT base_plz,radius_km,states_json,postal_codes_json FROM provider_service_areas WHERE user_id=?').get(req.user.id);if(!area)return res.json({rides:rides.map(withDriverMoney)});
+ const base=await resolveGermanPlz(area.base_plz);let states=[],codes=[];try{states=JSON.parse(area.states_json||'[]');}catch{}try{codes=JSON.parse(area.postal_codes_json||'[]');}catch{}
+ const filtered=[];for(const ride of rides){if(!ride.pickup_plz)continue;const info=await resolveGermanPlz(ride.pickup_plz);if(!info)continue;const explicit=codes.includes(info.plz)||states.includes(info.state);const radius=!!base&&base.lat!=null&&base.lon!=null&&info.lat!=null&&info.lon!=null&&distanceKm({lat:base.lat,lon:base.lon},{lat:info.lat,lon:info.lon})<=area.radius_km;if(explicit||radius)filtered.push(ride);}res.json({rides:filtered.map(withDriverMoney)});
 });
 // Atomic conditional update: only one driver can claim a request.
 app.post('/api/rides/:id/accept',requireRole('driver'),(req,res)=>{
+ const ban=db.prepare('SELECT ban_until FROM users WHERE id=?').get(req.user.id);if(ban?.ban_until&&Date.parse(String(ban.ban_until).replace(' ','T')+'Z')>Date.now())return res.status(403).json({error:'Dein Konto ist bis '+ban.ban_until+' für neue Aufträge gesperrt.'});
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
  const tx=db.transaction(()=>{
   const ride=db.prepare("SELECT price_cents,commission_cents,driver_payout_cents FROM ride_requests WHERE id=? AND status='quoted' AND assigned_driver_id IS NULL").get(id);
@@ -517,28 +810,59 @@ app.post('/api/rides/:id/accept',requireRole('driver'),(req,res)=>{
   const expectedPayout=Number(req.body?.payoutCents);
   const actualPayout=Number.isInteger(ride.driver_payout_cents)?ride.driver_payout_cents:ride.price_cents-(Number.isInteger(ride.commission_cents)?ride.commission_cents:Math.round(ride.price_cents*feePercent()/100));
   if(!Number.isInteger(expectedPayout)||expectedPayout!==actualPayout)return null;
-  const result=db.prepare("UPDATE ride_requests SET status='accepted',assigned_driver_id=?,accepted_at=CURRENT_TIMESTAMP WHERE id=? AND status='quoted' AND assigned_driver_id IS NULL").run(req.user.id,id);
+  const result=db.prepare("UPDATE ride_requests SET status='accepted',admin_status=NULL,assigned_driver_id=?,accepted_at=CURRENT_TIMESTAMP WHERE id=? AND status='quoted' AND assigned_driver_id IS NULL").run(req.user.id,id);
   if(!result.changes)return false;
   return true;
  });
  const accepted=tx();
  if(accepted===null)return res.status(409).json({error:'Die angezeigte Auszahlung stimmt nicht mehr. Bitte aktualisiere die Anfrage und prüfe den Betrag erneut.'});
  if(!accepted)return res.status(409).json({error:'Diese Anfrage wurde bereits angenommen oder ist nicht mehr verfügbar.'});
- const acceptedRide=db.prepare('SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE id=?').get(id);notifyRideStatus(acceptedRide,'accepted',req.user.id);
+ const acceptedRide=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id FROM ride_requests WHERE id=?').get(id);notifyRideStatus(acceptedRide,'accepted',req.user.id);
  const amounts=withMoney(db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id));
  res.json({message:'Du hast die Anfrage übernommen. Der angezeigte Netto-Auszahlungsbetrag wurde bestätigt.',driverPayoutEuro:amounts.driverPayoutEuro});
 });
 app.post('/api/rides/:id/cancel',requireRole('driver'),(req,res)=>{
  const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Ungültige Anfrage.'});
- const before=db.prepare('SELECT id,customer_id,assigned_driver_id FROM ride_requests WHERE id=?').get(id);
+ const before=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id FROM ride_requests WHERE id=?').get(id);
  const tx=db.transaction(()=>{
   const result=db.prepare("UPDATE ride_requests SET status='new',assigned_driver_id=NULL,accepted_at=NULL,admin_approved_at=NULL WHERE id=? AND status='accepted' AND assigned_driver_id=?").run(id,req.user.id);
   return result.changes;
  });
  if(!tx())return res.status(409).json({error:'Diese Anfrage ist dir nicht zugeordnet oder wurde bereits geändert.'});
+ const returned=db.prepare('SELECT dispute_status FROM ride_requests WHERE id=?').get(id);if(returned?.dispute_status&&returned.dispute_status!=='none')db.prepare("UPDATE ride_requests SET dispute_status='received',dispute_updated_at=CURRENT_TIMESTAMP,dispute_driver_id=? WHERE id=?").run(before.assigned_driver_id,id);
+ db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,'driver_release','accepted','new',?)").run(id,req.user.id,'driver',JSON.stringify({returnedToAdmin:true}));
  notifyRideStatus(before,'new',req.user.id);
- res.json({message:'Anfrage wurde zur erneuten Admin-Freigabe zurückgegeben.'});
+ res.json({message:'Anfrage wurde zur erneuten Admin-Prüfung zurückgegeben.'});
 });
+
+app.post('/api/rides/:id/service-action',requireRole('customer','driver'),(req,res)=>{
+ const id=Number(req.params.id),action=String(req.body?.action||'');
+ if(!Number.isInteger(id)||id<1)return res.status(400).json({error:'Ungültige Anfrage.'});
+ if(!['start','finish','confirm','dispute'].includes(action))return res.status(400).json({error:'Ungültige Aktion.'});
+ const ride=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);
+ if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
+ if(ride.status!=='accepted'||!ride.assigned_driver_id)return res.status(409).json({error:'Der Auftrag ist nicht aktiv zugeordnet.'});
+ if(req.user.role==='driver'&&Number(ride.assigned_driver_id)!==Number(req.user.id))return res.status(403).json({error:'Keine Berechtigung.'});
+ if(req.user.role==='customer'&&Number(ride.customer_id)!==Number(req.user.id))return res.status(403).json({error:'Keine Berechtigung.'});
+ const stage=ride.service_stage||'pending';
+ const rules={start:{role:'driver',from:'pending',to:'started',column:'service_started_at',status:'service_started'},finish:{role:'driver',from:'started',to:'awaiting_customer',column:'service_completed_at',status:'service_completed'},confirm:{role:'customer',from:'awaiting_customer',to:'confirmed',column:'service_confirmed_at',status:'service_confirmed'},dispute:{role:'customer',from:'awaiting_customer',to:'disputed',column:'service_disputed_at',status:'service_disputed'}};
+ const rule=rules[action];
+ if(req.user.role!==rule.role)return res.status(403).json({error:'Keine Berechtigung für diese Aktion.'});
+ if(stage!==rule.from)return res.status(409).json({error:'Dieser Schritt ist bereits erledigt oder derzeit nicht möglich.'});
+ const tx=db.transaction(()=>{
+  if(action==='dispute')db.prepare("UPDATE ride_requests SET dispute_status='received',dispute_updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+  const deadline=action==='finish'?", service_dispute_deadline_at=datetime('now','+48 hours')":'';
+  const result=db.prepare("UPDATE ride_requests SET service_stage=?, "+rule.column+"=CURRENT_TIMESTAMP"+deadline+" WHERE id=? AND status='accepted' AND service_stage=?").run(rule.to,id,stage);
+  if(!result.changes)return false;
+  db.prepare('INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,?,?,?,?)').run(id,req.user.id,req.user.role,'service_'+action,ride.status,ride.status,JSON.stringify({from:stage,to:rule.to,disputeStatus:action==='dispute'?'received':null}));
+  return true;
+ });
+ if(!tx())return res.status(409).json({error:'Der Auftragsstatus wurde inzwischen geändert. Bitte aktualisiere die Seite.'});
+ const updated=db.prepare('SELECT id,customer_id,assigned_driver_id,service_stage,service_started_at,service_completed_at,service_confirmed_at,service_disputed_at,service_dispute_deadline_at FROM ride_requests WHERE id=?').get(id);
+ notifyRideStatus(ride,rule.status,req.user.id,req.user.role==='customer'?ride.assigned_driver_id:ride.customer_id);
+ res.json({message:'Status aktualisiert.',service:updated});
+});
+
 app.get('/api/rides/assigned',requireRole('driver'),(req,res)=>{
  const rides=db.prepare("SELECT r.*,u.name AS customer_name FROM ride_requests r JOIN users u ON u.id=r.customer_id WHERE r.assigned_driver_id=? AND r.status='accepted' ORDER BY r.id DESC").all(req.user.id);
  res.json({rides:rides.map(withDriverMoney)});
@@ -601,14 +925,79 @@ app.post('/api/push/delivered',requireRole('customer','driver'),(req,res)=>{
 app.get('/api/notifications/unread',requireRole('customer','driver','admin'),(req,res)=>{
  db.prepare(`UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP) WHERE sender_id<>? AND id IN (SELECT message_id FROM app_notifications WHERE recipient_id=? AND read_at IS NULL AND message_id IS NOT NULL)`).run(req.user.id,req.user.id);
  db.prepare(`UPDATE chat_messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP) WHERE sender_id<>? AND id IN (SELECT message_id FROM chat_notifications WHERE recipient_id=? AND read_at IS NULL)`).run(req.user.id,req.user.id);
- const current=db.prepare(`SELECT 'n-'||n.id AS id,n.id AS internal_id,n.ride_request_id,n.kind,n.status,n.message_id,n.created_at,m.message,u.name AS sender_name FROM app_notifications n LEFT JOIN chat_messages m ON m.id=n.message_id LEFT JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL`).all(req.user.id);
+ const current=db.prepare(`SELECT 'n-'||n.id AS id,n.id AS internal_id,n.ride_request_id,n.kind,n.status,n.message_id,n.created_at,m.message,u.name AS sender_name FROM app_notifications n LEFT JOIN chat_messages m ON m.id=n.message_id LEFT JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL AND n.admin_message_id IS NULL`).all(req.user.id);
  const legacy=db.prepare(`SELECT 'c-'||n.id AS id,n.id AS internal_id,n.ride_request_id,'message' AS kind,NULL AS status,n.message_id,n.created_at,m.message,u.name AS sender_name FROM chat_notifications n JOIN chat_messages m ON m.id=n.message_id JOIN users u ON u.id=m.sender_id WHERE n.recipient_id=? AND n.read_at IS NULL AND NOT EXISTS(SELECT 1 FROM app_notifications a WHERE a.message_id=n.message_id AND a.recipient_id=n.recipient_id)`).all(req.user.id);
- res.json({notifications:[...current,...legacy].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,50)});
+ const adminMessages=db.prepare(`SELECT 'a-'||n.id AS id,n.id AS internal_id,n.ride_request_id,'status' AS kind,'admin_message' AS status,NULL AS message_id,n.created_at,m.message,u.name AS sender_name,m.participant_user_id,u.role AS sender_role FROM app_notifications n JOIN admin_chat_messages m ON m.id=n.admin_message_id JOIN users u ON u.id=m.sender_user_id WHERE n.recipient_id=? AND n.read_at IS NULL`).all(req.user.id);
+ res.json({notifications:[...current,...legacy,...adminMessages].sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,100)});
 });
 app.post('/api/notifications/read',requireRole('customer','driver','admin'),(req,res)=>{
  const ids=Array.isArray(req.body.ids)?req.body.ids.slice(0,100):[];
- for(const raw of ids){const value=String(raw);const match=value.match(/^([nc])-(\d+)$/);if(!match)continue;const id=Number(match[2]);if(match[1]==='n')db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else db.prepare('UPDATE chat_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);}
+ for(const raw of ids){const value=String(raw);const match=value.match(/^([nca])-(\d+)$/);if(!match)continue;const id=Number(match[2]);if(match[1]==='n')db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else if(match[1]==='c')db.prepare('UPDATE chat_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=?').run(req.user.id,id);else db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND id=? AND admin_message_id IS NOT NULL').run(req.user.id,id);}
  res.json({ok:true});
+});
+
+// Separate administrator conversations. Closed threads remain readable only by admins.
+function adminChatParticipant(ride,user){return (user.role==='customer'&&Number(ride.customer_id)===Number(user.id))||(user.role==='driver'&&Number(ride.assigned_driver_id)===Number(user.id));}
+function adminChatClosed(ride){return ['resolved','rejected'].includes(String(ride.dispute_status||''))||['closed','rejected'].includes(String(ride.admin_status||''));}
+function addAdminChatNotification(recipientId,rideId,messageId,actorId){
+ if(!recipientId||Number(recipientId)===Number(actorId))return;
+ const saved=db.prepare("INSERT INTO app_notifications(recipient_id,ride_request_id,kind,status,admin_message_id) VALUES(?,?,'status','admin_message',?)").run(recipientId,rideId,messageId);
+ sendPushToUser(recipientId,{kind:'status',status:'admin_message',rideId,notificationId:Number(saved.lastInsertRowid)}).catch(()=>{});
+}
+app.get('/api/admin/rides/:id/admin-chat/:participantId',requireRole('admin'),(req,res)=>{
+ const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status,admin_status FROM ride_requests WHERE id=?').get(id);
+ if(!ride||![ride.customer_id,ride.assigned_driver_id].map(Number).includes(participantId))return res.status(404).json({error:'Gespräch nicht gefunden.'});
+ const participant=db.prepare('SELECT id,name,role FROM users WHERE id=?').get(participantId);
+ const messages=db.prepare('SELECT m.id,m.sender_user_id,m.message,m.created_at,u.name AS sender_name FROM admin_chat_messages m JOIN users u ON u.id=m.sender_user_id WHERE m.ride_request_id=? AND m.participant_user_id=? ORDER BY m.id DESC LIMIT 200').all(id,participantId).reverse();
+ db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND ride_request_id=? AND admin_message_id IN (SELECT id FROM admin_chat_messages WHERE ride_request_id=? AND participant_user_id=? AND sender_user_id=?) AND read_at IS NULL').run(req.user.id,id,id,participantId,participantId);
+ res.json({participant,messages,closed:adminChatClosed(ride)});
+});
+app.post('/api/admin/rides/:id/admin-chat/:participantId',requireRole('admin'),(req,res)=>{
+ const id=Number(req.params.id),participantId=Number(req.params.participantId),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
+ if(!ride||![ride.customer_id,ride.assigned_driver_id].map(Number).includes(participantId))return res.status(404).json({error:'Gespräch nicht gefunden.'});
+ if(adminChatClosed(ride))return res.status(403).json({error:'Dieses Gespräch ist geschlossen. Neue Nachrichten sind nicht möglich.'});
+ const message=typeof req.body?.message==='string'?req.body.message.trim():'';if(!message||message.length>2000)return res.status(400).json({error:'Bitte gib eine Nachricht mit 1 bis 2000 Zeichen ein.'});
+ const saved=db.prepare('INSERT INTO admin_chat_messages(ride_request_id,participant_user_id,sender_user_id,message) VALUES(?,?,?,?)').run(id,participantId,req.user.id,message);
+ addAdminChatNotification(participantId,id,Number(saved.lastInsertRowid),req.user.id);
+ res.status(201).json({ok:true});
+});
+app.get('/api/rides/:id/admin-chat',requireRole('customer','driver'),(req,res)=>{
+ const id=Number(req.params.id),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
+ if(!ride||!adminChatParticipant(ride,req.user)||!ride.dispute_status||ride.dispute_status==='none')return res.status(403).json({error:'Dieses Admin-Gespräch ist nicht verfügbar.'});
+ if(adminChatClosed(ride))return res.status(403).json({error:'Dieses Gespräch wurde geschlossen.'});
+ const messages=db.prepare('SELECT m.id,m.sender_user_id,m.message,m.created_at,u.name AS sender_name FROM admin_chat_messages m JOIN users u ON u.id=m.sender_user_id WHERE m.ride_request_id=? AND m.participant_user_id=? ORDER BY m.id DESC LIMIT 200').all(id,req.user.id).reverse();
+ db.prepare('UPDATE app_notifications SET read_at=CURRENT_TIMESTAMP WHERE recipient_id=? AND ride_request_id=? AND admin_message_id IN (SELECT id FROM admin_chat_messages WHERE ride_request_id=? AND participant_user_id=? AND sender_user_id<>?) AND read_at IS NULL').run(req.user.id,id,id,req.user.id,req.user.id);
+ res.json({counterpartName:'HelferFix Admin',messages,closed:false});
+});
+app.post('/api/rides/:id/admin-chat',requireRole('customer','driver'),(req,res)=>{
+ const id=Number(req.params.id),ride=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id,dispute_status FROM ride_requests WHERE id=?').get(id);
+ if(!ride||!adminChatParticipant(ride,req.user)||!ride.dispute_status||ride.dispute_status==='none')return res.status(403).json({error:'Dieses Admin-Gespräch ist nicht verfügbar.'});
+ if(adminChatClosed(ride))return res.status(403).json({error:'Dieses Gespräch wurde geschlossen.'});
+ const message=typeof req.body?.message==='string'?req.body.message.trim():'';if(!message||message.length>2000)return res.status(400).json({error:'Bitte gib eine Nachricht mit 1 bis 2000 Zeichen ein.'});
+ const admin=db.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").get();if(!admin)return res.status(503).json({error:'Admin ist momentan nicht erreichbar.'});
+ const saved=db.prepare('INSERT INTO admin_chat_messages(ride_request_id,participant_user_id,sender_user_id,message) VALUES(?,?,?,?)').run(id,req.user.id,req.user.id,message);
+ addAdminChatNotification(admin.id,id,Number(saved.lastInsertRowid),req.user.id);
+ res.status(201).json({ok:true});
+});
+app.patch('/api/admin/rides/:id/dispute',requireRole('admin'),(req,res)=>{
+ const id=Number(req.params.id),status=String(req.body?.status||''),note=clean(req.body?.note,1000);
+ const allowed=['received','reviewing','waiting_customer','waiting_driver','resolved','rejected'];
+ if(!Number.isInteger(id)||!allowed.includes(status))return res.status(400).json({error:'Ungültiger Prüfstatus.'});
+ const ride=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
+ if(!ride.service_disputed_at&&ride.dispute_status==='none')return res.status(409).json({error:'Für diese Anfrage liegt kein Einspruch vor.'});
+ db.prepare('UPDATE ride_requests SET dispute_status=?,dispute_updated_at=CURRENT_TIMESTAMP,admin_resolution_note=CASE WHEN ? IN (\'resolved\',\'rejected\') THEN ? ELSE admin_resolution_note END WHERE id=?').run(status,status,note||null,id);
+ db.prepare('INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,\'admin_dispute_update\',?,?,?)').run(id,req.user.id,'admin',ride.dispute_status,status,JSON.stringify({note:note||null}));
+ const updated=db.prepare('SELECT id,customer_id,COALESCE(assigned_driver_id,dispute_driver_id) AS assigned_driver_id FROM ride_requests WHERE id=?').get(id);notifyRideStatus(updated,'dispute_'+status,req.user.id,updated.assigned_driver_id);
+ res.json({ok:true,status});
+});
+app.patch('/api/admin/users/:id/ban',requireRole('admin'),(req,res)=>{
+ const id=Number(req.params.id),days=req.body?.days,reason=clean(req.body?.reason,500);
+ if(!Number.isInteger(id)||id<1||!(days===null||Number.isInteger(days)&&days>=1&&days<=3650))return res.status(400).json({error:'Bitte gib eine Sperrdauer zwischen 1 und 3650 Tagen an oder null zum Aufheben.'});
+ const target=db.prepare('SELECT id,role FROM users WHERE id=?').get(id);if(!target)return res.status(404).json({error:'Nutzer nicht gefunden.'});if(target.role==='admin')return res.status(400).json({error:'Admin-Konten können nicht gesperrt werden.'});
+ const until=days===null?null:new Date(Date.now()+days*86400000).toISOString();
+ db.prepare('UPDATE users SET ban_until=?,ban_reason=? WHERE id=?').run(until,days===null?null:reason||'Admin-Sperre',id);
+ db.prepare('INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,details) SELECT id,?,\'admin\',\'user_ban_change\',? FROM ride_requests WHERE customer_id=? OR assigned_driver_id=?').run(req.user.id,JSON.stringify({userId:id,days,reason}),id,id);
+ res.json({ok:true,banUntil:until});
 });
 
 app.get('/api/admin/summary',requireRole('admin'),(req,res)=>res.json({
@@ -619,7 +1008,7 @@ app.get('/api/admin/summary',requireRole('admin'),(req,res)=>res.json({
  newRides:db.prepare("SELECT COUNT(*) n FROM ride_requests WHERE status='new'").get().n,
  availableRides:db.prepare("SELECT COUNT(*) n FROM ride_requests WHERE status='quoted'").get().n
 }));
-app.get('/api/admin/users',requireRole('admin'),(req,res)=>res.json({users:db.prepare('SELECT id,name,email,role,active,created_at FROM users ORDER BY id DESC LIMIT 500').all()}));
+app.get('/api/admin/users',requireRole('admin'),(req,res)=>res.json({users:db.prepare('SELECT id,name,email,role,active,created_at,ban_until,ban_reason FROM users ORDER BY id DESC LIMIT 500').all()}));
 app.patch('/api/admin/users/:id',requireRole('admin'),(req,res)=>{
  const id=Number(req.params.id),active=req.body.active;if(!Number.isInteger(id)||typeof active!=='boolean')return res.status(400).json({error:'Ungültige Daten.'});
  const target=db.prepare('SELECT id,role FROM users WHERE id=?').get(id);if(!target)return res.status(404).json({error:'Nutzer nicht gefunden.'});if(target.role==='admin')return res.status(400).json({error:'Admin-Konten können hier nicht deaktiviert werden.'});
@@ -633,17 +1022,27 @@ app.get('/api/admin/rides',requireRole('admin'),(req,res)=>{
  res.json({rides:rides.map(withMoney)});
 });
 app.patch('/api/admin/rides/:id',requireRole('admin'),(req,res)=>{
- const id=Number(req.params.id),status=req.body.status;
- if(!Number.isInteger(id)||!['new','quoted','accepted','cancelled','completed'].includes(status))return res.status(400).json({error:'Ungültiger Status.'});
+ const id=Number(req.params.id),adminStatus=String(req.body?.status||'');
+ const allowed=['new','reviewing','waiting_customer','waiting_driver','approved','in_progress','completed','rejected','closed'];
+ if(!Number.isInteger(id)||!allowed.includes(adminStatus))return res.status(400).json({error:'Ungültiger Status.'});
  const ride=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);if(!ride)return res.status(404).json({error:'Anfrage nicht gefunden.'});
- if(status==='accepted')return res.status(400).json({error:'Der Status „Angenommen“ wird nur gesetzt, wenn ein Fahrer die Anfrage selbst annimmt.'});
- if(status==='quoted'&&(!Number.isInteger(ride.price_cents)||ride.price_cents<100))return res.status(400).json({error:'Diese alte Anfrage hat keinen festgelegten Kundenpreis. Bitte erstelle eine neue Anfrage.'});
- if(status==='quoted'&&ride.status==='accepted')return res.status(409).json({error:'Bitte lasse den Fahrer die Anfrage zuerst freigeben.'});
- const approvedAt=status==='quoted'?(ride.admin_approved_at||new Date().toISOString()):ride.admin_approved_at;
- db.prepare('UPDATE ride_requests SET status=?,admin_approved_at=?,assigned_driver_id=CASE WHEN ? IN (\'new\',\'cancelled\',\'completed\') THEN NULL ELSE assigned_driver_id END,accepted_at=CASE WHEN ? IN (\'new\',\'cancelled\',\'completed\') THEN NULL ELSE accepted_at END WHERE id=?').run(status,approvedAt,status,status,id);
- if(status==='quoted'&&ride.status!=='quoted'){const approvedRide=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);notifyDriversOfNewRide(approvedRide,req.user.id);}
- if(ride.status!==status&&status==='cancelled')db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status) VALUES(?,?,?,'admin_cancel',?,'cancelled')").run(id,req.user.id,'admin',ride.status);if(ride.status!==status)notifyRideStatus(ride,status,req.user.id,ride.assigned_driver_id);
- res.json({message:status==='quoted'?'Anfrage freigegeben und für Fahrer sichtbar.':status==='cancelled'?'Anfrage storniert.':status==='completed'?'Anfrage abgeschlossen.':'Status aktualisiert.'});
+ if(adminStatus==='approved'&&(!Number.isInteger(ride.price_cents)||ride.price_cents<100))return res.status(400).json({error:'Diese Anfrage hat keinen gültigen Kundenpreis und kann nicht freigegeben werden.'});
+ let operationalStatus=ride.status;
+ if(adminStatus==='approved')operationalStatus='quoted';
+ else if(adminStatus==='new')operationalStatus='new';
+ else if(adminStatus==='completed')operationalStatus='completed';
+ else if(adminStatus==='rejected'||adminStatus==='closed')operationalStatus='cancelled';
+ const clearAssignment=['new','approved','completed','rejected','closed'].includes(adminStatus);
+ const approvedAt=adminStatus==='approved'?(ride.admin_approved_at||new Date().toISOString()):ride.admin_approved_at;
+ const changed=db.prepare('UPDATE ride_requests SET admin_status=?,status=?,admin_approved_at=?,assigned_driver_id=CASE WHEN ?=1 THEN NULL ELSE assigned_driver_id END,accepted_at=CASE WHEN ?=1 THEN NULL ELSE accepted_at END WHERE id=?').run(adminStatus,operationalStatus,approvedAt,clearAssignment?1:0,clearAssignment?1:0,id);
+ if(!changed.changes)return res.status(409).json({error:'Der Auftrag konnte nicht aktualisiert werden.'});
+ db.prepare("INSERT INTO ride_audit_log(ride_request_id,actor_user_id,actor_role,action,old_status,new_status,details) VALUES(?,?,?,'admin_status_change',?,?,?)").run(id,req.user.id,'admin',ride.admin_status||ride.status,adminStatus,JSON.stringify({operational_old:ride.status,operational_new:operationalStatus}));
+ const updated=db.prepare('SELECT * FROM ride_requests WHERE id=?').get(id);
+ if(adminStatus==='approved'&&(ride.status!=='quoted'||ride.admin_status!=='approved'))notifyDriversOfNewRide(updated,req.user.id);
+ if(ride.admin_status!==adminStatus||ride.status!==operationalStatus){
+  notifyRideStatus(updated,adminStatus,req.user.id,ride.assigned_driver_id);
+ }
+ res.json({ok:true,status:adminStatus,message:'Status updated.'});
 });
 app.get('/api/support/contact',(req,res)=>{const row=db.prepare('SELECT value FROM settings WHERE key=?').get('support_email');res.json({email:row?.value||''});});
 app.get('/api/support/assistant/status',(req,res)=>res.json({enabled:!!OPENAI_API_KEY}));
